@@ -1,4 +1,5 @@
 mod config;
+mod database;
 mod sqlite;
 
 use self::config::Config;

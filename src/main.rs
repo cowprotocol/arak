@@ -13,8 +13,10 @@ struct Arguments {
 }
 
 fn main() {
+    tracing_subscriber::fmt::init();
+
     let args = Arguments::parse();
     let config = Config::load(&args.config).expect("failed to load configuration");
 
-    println!("{config:#?}");
+    tracing::info!("{config:#?}");
 }

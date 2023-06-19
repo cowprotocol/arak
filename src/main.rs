@@ -1,4 +1,5 @@
 mod config;
+mod sqlite;
 
 use self::config::Config;
 use clap::Parser;

@@ -8,8 +8,11 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 rusqlite = "0.29"
 serde = { version = "1", features = ["derive"] }
-solabi = "0.0.3"
+solabi = { version = "0.0.4", features = ["macros"] }
 toml = "0.7"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 url = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+hex-literal = "0.4"

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
+rusqlite = "0.29"
 serde = { version = "1", features = ["derive"] }
 solabi = "0.0.3"
 toml = "0.7"

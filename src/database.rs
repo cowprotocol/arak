@@ -1,6 +1,7 @@
 // TODO:
 // - Make `store_event` take multiple inputs that are stored together in the same transaction.
 // - Implement this for Postgres in addition to Sqlite. Postgres will likely have a native async backend, so we should have the trait be async and internally `spawn_blocking` for use of non async rusqlite.
+// - Think about whether the trait should be Send + Sync and whether methods should take mutable Self.
 
 use anyhow::Result;
 use solabi::{abi::EventDescriptor, value::Value};
@@ -23,7 +24,7 @@ pub trait Database {
     /// Errors:
     ///
     /// - A table for `name` already exists with an incompatible event signature.
-    fn prepare_event(name: &str, event: &EventDescriptor) -> Result<()>;
+    fn prepare_event(&mut self, name: &str, event: &EventDescriptor) -> Result<()>;
 
     /// Store an event in the database.
     ///
@@ -32,6 +33,7 @@ pub trait Database {
     /// - `prepare_event` has not been successfully called with this `name`.
     /// - `fields` do not match the event signature specified in the successful call to `prepare_event` with this `name`.
     fn store_event(
+        &mut self,
         name: &str,
         block_number: u64,
         log_index: u64,

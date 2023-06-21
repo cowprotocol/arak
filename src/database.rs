@@ -10,9 +10,16 @@ use std::{
     iter,
 };
 
-/// The last indexed block for a given event.
+/// The block information attached to an event.
 #[derive(Debug)]
-pub struct IndexedBlock<'a> {
+pub struct Block<'a> {
+    pub event: &'a str,
+    pub indexed: u64,
+    pub finalized: u64,
+}
+
+/// An uncled block. All logs for this block or newer are considered invalid.
+pub struct Uncle<'a> {
     pub event: &'a str,
     pub number: u64,
 }
@@ -48,11 +55,11 @@ pub trait Database {
     /// - A table for `name` already exists with an incompatible event signature.
     fn prepare_event(&mut self, name: &str, event: &EventDescriptor) -> Result<()>;
 
-    /// Retrieves the last indexed block for the specified event.
-    fn event_block(&mut self, name: &str) -> Result<Option<u64>>;
+    /// Retrieves the block information for the specified event.
+    fn event_block(&mut self, name: &str) -> Result<Option<Block>>;
 
     /// Updates the storage in a single transaction. It updates two things:
-    /// - `blocks` specifies updates to the last updated block for events; this
+    /// - `blocks` specifies updates to the block information for events; this
     ///   will change the value that is read from `event_block`.
     /// - `logs` specified new logs to append to the database.
     ///
@@ -62,7 +69,14 @@ pub trait Database {
     ///   from one or more of the specified `blocks` or `logs`.
     /// - `fields` do not match the event signature specified in the successful
     ///   call to `prepare_event` with this `event` name for one or more `logs`.
-    fn update(&mut self, blocks: &[IndexedBlock], logs: &[Log]) -> Result<()>;
+    fn update(&mut self, blocks: &[Block], logs: &[Log]) -> Result<()>;
+
+    /// Removes logs from the specified event's uncled blocks.
+    ///
+    /// Additionally the last indexed block is set to the uncled block's parent;
+    /// this changes the `indexed` field of the result from `event_block` for
+    /// the specified events.
+    fn remove(&mut self, uncles: &[Uncle]) -> Result<()>;
 }
 
 #[derive(Default)]

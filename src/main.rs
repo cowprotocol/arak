@@ -1,6 +1,7 @@
 mod config;
 mod database;
 mod decoder;
+mod event_visitor;
 mod sqlite;
 
 use self::{config::Config, decoder::Decoder};

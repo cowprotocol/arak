@@ -40,19 +40,20 @@ impl Chain {
         Ok(Append::Ok)
     }
 
-    /// Updates the finalized block.
-    pub fn finalize(&mut self, finalized: U256) -> Result<()> {
+    /// Updates the finalized block. Returns the previous finalized block.
+    pub fn finalize(&mut self, finalized: U256) -> Result<U256> {
         anyhow::ensure!(
             (self.finalized..self.next()).contains(&finalized),
             "invalid finalized block"
         );
 
         let keep = self.next() - finalized;
+        let old = self.finalized;
 
         self.finalized = finalized;
         self.hashes.truncate(keep.as_usize());
 
-        Ok(())
+        Ok(old)
     }
 }
 

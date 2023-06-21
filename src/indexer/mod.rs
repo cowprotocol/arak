@@ -75,6 +75,8 @@ where
                 .prepare_event(adapter.name(), adapter.signature())?;
         }
 
+        // TODO(nlordell): Clear un-finalized logs from the database.
+
         loop {
             let finalized = self
                 .eth
@@ -147,7 +149,12 @@ where
     /// Synchronises more events. Returns `true` if new blockchain state was
     /// processed.
     async fn sync(&mut self, chain: &mut Chain) -> Result<bool> {
-        let mut next = match self
+        // TODO(nlordell): Remove reorged blocks and update with new data in a
+        // single database transaction.
+        // TODO(nlordell): Check database event indexed block matches.
+        // TODO(nlordell): Update finalized block in the database.
+
+        let next = match self
             .eth
             .execute(eth::GetBlockByNumber, (chain.next().into(), Hydrated::No))
             .await?
@@ -156,33 +163,72 @@ where
             None => return Ok(false),
         };
 
-        tracing::debug!(
-            block = %next.number, hash = %next.hash,
-            "found new block"
-        );
-
-        let mut pending = Vec::new();
-        while match chain.append(next.hash, next.parent_hash)? {
-            chain::Append::Reorg => true,
-            chain::Append::Ok => false,
-        } {
-            pending.push((next.hash, next.parent_hash));
-            next = self
-                .eth
-                .execute(eth::GetBlockByNumber, (chain.next().into(), Hydrated::No))
-                .await?
-                .context("missing block data for past block")?;
+        match chain.append(next.hash, next.parent_hash)? {
+            chain::Append::Ok => {
+                tracing::debug!(
+                    block = %next.number, hash = %next.hash,
+                    "found new block"
+                );
+            }
+            chain::Append::Reorg => {
+                tracing::debug!(
+                    block = %next.number - 1, hash = %next.parent_hash,
+                    "reorg"
+                );
+                todo!("remove all events on reorged block");
+                //return Ok(true);
+            }
         }
 
-        if !pending.is_empty() {
-            let (block, hash) = (next.number - 1, next.parent_hash);
-            tracing::debug!(%block, %hash, "reorg");
+        let (finalized, results) = tokio::try_join!(
+            async {
+                self.eth
+                    .execute(
+                        eth::GetBlockByNumber,
+                        (BlockTag::Finalized.into(), Hydrated::No),
+                    )
+                    .await?
+                    .context("missing finalized block")
+            },
+            async {
+                self.eth
+                    .batch(
+                        self.adapters
+                            .iter()
+                            .map(|adapter| {
+                                (eth::GetLogs, (adapter.filter(LogBlocks::Hash(next.hash)),))
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .await
+                    .map_err(anyhow::Error::from)
+            },
+        )?;
+
+        if chain.finalize(finalized.number)? != finalized.number {
+            tracing::debug!(
+                block = %finalized.number,
+                "updated finalized block"
+            );
         }
 
-        // TODO(nlordell): Remove reorged events in a single transaction!
-        // TODO(nlordell): Check database event indexed block matches!
-        // TODO(nlordell): Update finalized block in the database!
+        let blocks = self
+            .adapters
+            .iter()
+            .map(|adapter| database::IndexedBlock {
+                event: adapter.name(),
+                number: next.number.as_u64(),
+            })
+            .collect::<Vec<_>>();
+        let logs = self
+            .adapters
+            .iter()
+            .zip(results)
+            .flat_map(|(adapter, logs)| logs.into_iter().map(move |log| (adapter, log)))
+            .filter_map(|(adapter, log)| database_log(adapter, log))
+            .collect::<Vec<_>>();
 
+        self.database.update(&blocks, &logs)?;
         Ok(true)
     }
 
@@ -200,7 +246,7 @@ where
     }
 }
 
-fn database_log<'a>(adapter: &'a Adapter, log: ethrpc::types::Log) -> Option<database::Log<'a>> {
+fn database_log(adapter: &Adapter, log: ethrpc::types::Log) -> Option<database::Log> {
     let fields = match adapter.decode(&log.topics, &log.data) {
         Ok(fields) => fields,
         Err(err) => {

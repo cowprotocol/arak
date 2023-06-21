@@ -9,6 +9,7 @@ use std::{
     fmt::{self, Debug, Formatter},
     fs,
     path::Path,
+    time::Duration,
 };
 use url::Url;
 
@@ -17,10 +18,19 @@ use url::Url;
 pub struct Config {
     pub ethrpc: Url,
     pub database: Url,
-    #[serde(default = "init_page_size::default")]
-    pub init_page_size: u64,
+    #[serde(default = "indexer::default")]
+    pub indexer: Indexer,
     #[serde(rename = "event")]
     pub events: Vec<Event>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Indexer {
+    #[serde(default = "indexer::default_page_size")]
+    pub page_size: u64,
+    #[serde(default = "indexer::default_poll_interval", with = "duration")]
+    pub poll_interval: Duration,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,7 +66,7 @@ impl Debug for Config {
         f.debug_struct("Config")
             .field("ethrpc", &self.ethrpc.as_str())
             .field("database", &self.database.as_str())
-            .field("init_page_size", &self.init_page_size)
+            .field("indexer", &self.indexer)
             .field("event", &self.events)
             .finish()
     }
@@ -91,9 +101,36 @@ mod contract {
     }
 }
 
-mod init_page_size {
-    pub fn default() -> u64 {
+mod indexer {
+    use super::Indexer;
+    use std::time::Duration;
+
+    pub fn default() -> Indexer {
+        Indexer {
+            page_size: default_page_size(),
+            poll_interval: default_poll_interval(),
+        }
+    }
+
+    pub fn default_page_size() -> u64 {
         1000
+    }
+
+    pub fn default_poll_interval() -> Duration {
+        Duration::from_secs_f64(0.1)
+    }
+}
+
+mod duration {
+    use serde::{Deserialize, Deserializer};
+    use std::time::Duration;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = f64::deserialize(deserializer)?;
+        Ok(Duration::from_secs_f64(secs))
     }
 }
 

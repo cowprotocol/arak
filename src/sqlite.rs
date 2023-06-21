@@ -1,7 +1,6 @@
 use crate::{
     database::{self, Database},
     event_visitor::{VisitKind, VisitValue},
-
 };
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{

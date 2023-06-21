@@ -1,13 +1,17 @@
 # Sample configuration file for Arak indexing service
 
 ethrpc = "https://mainnet.infura.io/v3/<INFURA_PROJECT_ID>"
+database = "file://<DB_PATH>"
 
 [[event]]
-name = "uniswapv2_pair_created"
-contract = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
-signature = "event PairCreated(address indexed token0, address indexed token1, address pair, uint);"
+name = "cowprotocol_settlements"
+start = 12593265
+contract = "0x9008d19f58aabd9ed0d60971565aa8510560ab41"
+signature = "event Settlement(address indexed solver)"
 
 [[event]]
-name = "uniswapv2_sync"
+name = "cowprotocol_inbound_transfers"
+start = 12593265
 contract = "*"
-signature = "event Sync(uint112 reserve0, uint112 reserve1);"
+topics = ["0x0000000000000000000000009008d19f58aabd9ed0d60971565aa8510560ab41"]
+signature = "event Transfer(address indexed from, address indexed to, uint256 value)"

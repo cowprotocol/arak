@@ -1,6 +1,10 @@
 use anyhow::Result;
+use ethrpc::types::{ArrayVec, LogFilterValue};
 use serde::Deserialize;
-use solabi::{abi::EventDescriptor, ethprim::Address};
+use solabi::{
+    abi::EventDescriptor,
+    ethprim::{Address, Digest},
+};
 use std::{
     fmt::{self, Debug, Formatter},
     fs,
@@ -9,8 +13,12 @@ use std::{
 use url::Url;
 
 #[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct Config {
     pub ethrpc: Url,
+    pub database: Url,
+    #[serde(default = "init_page_size::default")]
+    pub init_page_size: u64,
     #[serde(rename = "event")]
     pub events: Vec<Event>,
 }
@@ -18,7 +26,11 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 pub struct Event {
     pub name: String,
+    #[serde(default)]
+    pub start: u64,
     pub contract: Contract,
+    #[serde(default)]
+    pub topics: ArrayVec<LogFilterValue<Digest>, 3>,
     #[serde(with = "signature")]
     pub signature: EventDescriptor,
 }
@@ -43,6 +55,8 @@ impl Debug for Config {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("Config")
             .field("ethrpc", &self.ethrpc.as_str())
+            .field("database", &self.database.as_str())
+            .field("init_page_size", &self.init_page_size)
             .field("event", &self.events)
             .finish()
     }
@@ -74,5 +88,25 @@ mod contract {
         (s == "*")
             .then_some(())
             .ok_or_else(|| de::Error::custom("expected '*' string"))
+    }
+}
+
+mod init_page_size {
+    pub fn default() -> u64 {
+        1000
+    }
+}
+
+impl Event {
+    #[cfg(test)]
+    pub fn for_signature(signature: &str) -> Self {
+        let signature = EventDescriptor::parse_declaration(signature).unwrap();
+        Self {
+            name: signature.name.clone(),
+            start: 0,
+            contract: Contract::All,
+            topics: ArrayVec::new(),
+            signature,
+        }
     }
 }

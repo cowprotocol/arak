@@ -1,3 +1,6 @@
+// TODO:
+// - Would be nicer as iterators.
+
 use std::ops::Deref;
 
 use solabi::value::{Value, ValueKind};

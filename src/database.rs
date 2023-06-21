@@ -3,7 +3,7 @@
 // - Implement this for Postgres in addition to Sqlite. Postgres will likely have a native async backend, so we should have the trait be async and internally `spawn_blocking` for use of non async rusqlite.
 // - Think about whether the trait should be Send + Sync and whether methods should take mutable Self.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use solabi::{abi::EventDescriptor, ethprim::Address, value::Value};
 use std::{
     collections::{hash_map, HashMap},
@@ -49,7 +49,7 @@ pub trait Database {
     fn prepare_event(&mut self, name: &str, event: &EventDescriptor) -> Result<()>;
 
     /// Retrieves the last indexed block for the specified event.
-    fn event_block(&mut self, name: &str) -> Result<u64>;
+    fn event_block(&mut self, name: &str) -> Result<Option<u64>>;
 
     /// Updates the storage in a single transaction. It updates two things:
     /// - `blocks` specifies updates to the last updated block for events; this
@@ -79,11 +79,8 @@ impl Database for Dummy {
         Ok(())
     }
 
-    fn event_block(&mut self, name: &str) -> Result<u64> {
-        self.events
-            .get(name)
-            .copied()
-            .context("missing event {name}")
+    fn event_block(&mut self, name: &str) -> Result<Option<u64>> {
+        Ok(self.events.get(name).copied())
     }
 
     fn update(&mut self, blocks: &[IndexedBlock], logs: &[Log]) -> Result<()> {

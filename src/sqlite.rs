@@ -1,5 +1,7 @@
-use std::{collections::HashMap, fmt::Write};
-
+use crate::{
+    database::{self, Database},
+    event_visitor::{VisitKind, VisitValue},
+};
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{
     types::{ToSqlOutput, Type as SqlType, Value as SqlValue, ValueRef as SqlValueRef},
@@ -9,11 +11,7 @@ use solabi::{
     abi::EventDescriptor,
     value::{Value as AbiValue, ValueKind as AbiKind},
 };
-
-use crate::{
-    database::Database,
-    event_visitor::{VisitKind, VisitValue},
-};
+use std::{collections::HashMap, fmt::Write};
 
 pub struct Sqlite {
     connection: Connection,
@@ -163,6 +161,22 @@ impl Database for Sqlite {
         Ok(())
     }
 
+    fn event_block(&mut self, name: &str) -> Result<u64> {
+        todo!("fetch the indexed block number for event {name}")
+    }
+
+    fn update(&mut self, _: &[database::IndexedBlock], _: &[database::Log]) -> Result<()> {
+        // Silence "dead_code" errors.
+        let _ = Self::store_event;
+        todo!("try to parse fields according to event descriptor")
+    }
+}
+
+impl Sqlite {
+    fn _read_event(_name: &str, _block_number: u64, _log_index: u64) -> Result<Vec<AbiValue>> {
+        todo!()
+    }
+
     fn store_event<'a>(
         &mut self,
         name: &str,
@@ -262,12 +276,6 @@ impl Database for Sqlite {
         transaction.commit().context("commit")?;
 
         Ok(())
-    }
-}
-
-impl Sqlite {
-    fn _read_event(_name: &str, _block_number: u64, _log_index: u64) -> Result<Vec<AbiValue>> {
-        todo!()
     }
 }
 

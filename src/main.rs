@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     let mut last_block = eth
-        .execute_empty(eth::BlockNumber)
+        .call(eth::BlockNumber)
         .await
         .context("failed to get starting block number")?
         - 1;

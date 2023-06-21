@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
-ethrpc = { version = "0.0.4", features = ["http"] }
+ethrpc = { version = "0.0.7", features = ["http"] }
 rusqlite = { version = "0.29", features = ["extra_check"] }
 serde = { version = "1", features = ["derive"] }
 solabi = { version = "0.0.4", features = ["macros"] }

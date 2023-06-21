@@ -467,10 +467,6 @@ mod tests {
 
     #[test]
     fn full_leaf_types() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("trace")
-            .try_init();
-
         let mut sqlite = Sqlite::new_for_test();
         let values = vec![
             AbiKind::Int(BitWidth::MIN),

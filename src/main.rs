@@ -32,8 +32,8 @@ async fn main() -> Result<()> {
     );
     let database = database::Dummy::default();
 
-    let _indexer = Indexer::create(eth, database, config.events)?
-        .init(config.init_page_size)
+    Indexer::create(eth, database, config.events)?
+        .run(config.init_page_size)
         .await?;
 
     Ok(())

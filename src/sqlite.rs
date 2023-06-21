@@ -11,7 +11,7 @@ use solabi::{
     abi::EventDescriptor,
     value::{Value as AbiValue, ValueKind as AbiKind},
 };
-use std::{collections::HashMap, fmt::Write};
+use std::{collections::HashMap, fmt::Write, path::Path};
 
 pub struct Sqlite {
     connection: Connection,
@@ -43,17 +43,21 @@ struct InsertStatement {
 }
 
 impl Sqlite {
-    pub fn _new(connection: Connection) -> Self {
+    pub fn new(connection: Connection) -> Self {
         Self {
             connection,
             events: Default::default(),
         }
     }
 
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Self::new(Connection::open(path)?))
+    }
+
     #[cfg(test)]
     /// Create a temporary in memory database for tests.
     pub fn new_for_test() -> Self {
-        Self::_new(Connection::open_in_memory().unwrap())
+        Self::new(Connection::open_in_memory().unwrap())
     }
 
     #[cfg(test)]

@@ -1,16 +1,12 @@
 mod config;
 mod database;
-mod decoder;
 mod event_visitor;
+mod indexer;
 mod sqlite;
 
-use self::{config::Config, decoder::Decoder};
+use self::{config::Config, indexer::Indexer};
 use anyhow::{Context, Result};
 use clap::Parser;
-use ethrpc::{
-    eth,
-    types::{BlockTag, Digest, Hydrated},
-};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -26,52 +22,19 @@ async fn main() -> Result<()> {
     let args = Arguments::parse();
     let config = Config::load(&args.config).context("failed to load configuration")?;
 
-    tracing::info!("{config:#?}");
-
     let eth = ethrpc::http::Client::new(config.ethrpc);
-    let decoders = config
-        .events
-        .into_iter()
-        .map(|event| {
-            Ok((
-                event.name,
-                Decoder::new(&event.signature).context("unsupported event signature")?,
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let _database = sqlite::Sqlite::open(
+        &config
+            .database
+            .to_file_path()
+            .ok()
+            .context("database must be a file:// URL")?,
+    );
+    let database = database::Dummy::default();
 
-    let mut last_block = eth
-        .call(eth::BlockNumber)
-        .await
-        .context("failed to get starting block number")?
-        - 1;
-    loop {
-        let block = eth
-            .execute(
-                eth::GetBlockByNumber,
-                (BlockTag::Latest.into(), Hydrated::Yes),
-            )
-            .await?
-            .context("missing latest block data")?;
+    let _indexer = Indexer::create(eth, database, config.events)?
+        .init(config.init_page_size)
+        .await?;
 
-        if last_block >= block.number {
-            continue;
-        }
-        tracing::info!(?block.number, "new block");
-        last_block = block.number;
-
-        let logs = get_block_logs(block.hash);
-        for log in &logs {
-            for (name, decoder) in &decoders {
-                if let Ok(fields) = decoder.decode(log) {
-                    tracing::info!(?name, ?fields, "event");
-                }
-            }
-        }
-    }
-}
-
-fn get_block_logs(_: Digest) -> Vec<solabi::log::Log<'static>> {
-    // todo
-    vec![]
+    Ok(())
 }

@@ -239,7 +239,7 @@ where
             .map(|adapter| {
                 Ok(cmp::max(
                     adapter.start(),
-                    self.database.event_block(adapter.name())? + 1,
+                    self.database.event_block(adapter.name())?.unwrap_or(0) + 1,
                 ))
             })
             .collect()

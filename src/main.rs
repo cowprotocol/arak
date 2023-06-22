@@ -23,14 +23,13 @@ async fn main() -> Result<()> {
     let config = Config::load(&args.config).context("failed to load configuration")?;
 
     let eth = ethrpc::http::Client::new(config.ethrpc);
-    let _database = sqlite::Sqlite::open(
+    let database = sqlite::Sqlite::open(
         &config
             .database
             .to_file_path()
             .ok()
             .context("database must be a file:// URL")?,
-    );
-    let database = database::Dummy::default();
+    )?;
 
     Indexer::create(eth, database, config.events)?
         .run(indexer::Run {

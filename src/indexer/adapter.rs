@@ -87,7 +87,7 @@ impl Adapter {
             topics: {
                 let mut converted = solabi::log::Topics::default();
                 for topic in topics {
-                    converted.push(topic.0);
+                    converted.push(topic);
                 }
                 converted
             },

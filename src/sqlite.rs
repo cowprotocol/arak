@@ -119,7 +119,9 @@ impl SqliteInner {
 
     /// Sanitize event name so it will work as a SQL table name.
     fn internal_event_name(name: &str) -> String {
-        name.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+        name.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect()
     }
 
     fn _read_event(
@@ -133,6 +135,7 @@ impl SqliteInner {
     }
 
     fn event_block(&self, connection: &Connection, name: &str) -> Result<Option<database::Block>> {
+        let name = Self::internal_event_name(name);
         let mut statement = connection
             .prepare_cached(GET_EVENT_BLOCK_SQL)
             .context("prepare_cached")?;
@@ -156,8 +159,9 @@ impl SqliteInner {
             .prepare_cached(SET_EVENT_BLOCK_SQL)
             .context("prepare_cached")?;
         for block in blocks {
-            if !self.events.contains_key(block.event) {
-                return Err(anyhow!("event {} wasn't prepared", block.event));
+            let name = Self::internal_event_name(block.event);
+            if !self.events.contains_key(&name) {
+                return Err(anyhow!("event {name} wasn't prepared"));
             }
             let indexed: i64 = block
                 .block
@@ -170,7 +174,7 @@ impl SqliteInner {
                 .try_into()
                 .context("finalized out of bounds")?;
             statement
-                .execute((block.event, indexed, finalized))
+                .execute((name, indexed, finalized))
                 .context("execute")?;
         }
         Ok(())

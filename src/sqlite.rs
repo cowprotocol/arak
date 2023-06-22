@@ -50,8 +50,10 @@ impl Database for Sqlite {
         transaction.commit().context("commit")
     }
 
-    fn remove(&mut self, _: &[database::Uncle]) -> Result<()> {
-        todo!()
+    fn remove(&mut self, uncles: &[database::Uncle]) -> Result<()> {
+        let transaction = self.connection.transaction().context("transaction")?;
+        self.inner.remove(&transaction, uncles)?;
+        transaction.commit().context("commit")
     }
 }
 
@@ -64,8 +66,9 @@ const FIXED_COLUMNS: usize = 4;
 const FIXED_COLUMNS_SQL: &str = "block_number INTEGER NOT NULL, log_index INTEGER NOT NULL, transaction_index INTEGER NOT NULL, address BLOB NOT NULL";
 const FIXED_PRIMARY_KEY: &str = "PRIMARY KEY(block_number ASC, log_index ASC)";
 
-const GET_EVENT_BLOCK_SQL: &str = "SELECT block FROM event_block WHERE event = ?1;";
-const SET_EVENT_BLOCK_SQL: &str ="INSERT INTO event_block (event, block) VALUES(?1, ?2) ON CONFLICT(event) DO UPDATE SET block = ?2;";
+const EVENT_BLOCK_SQL: &str = "CREATE TABLE IF NOT EXISTS event_block(event TEXT PRIMARY KEY NOT NULL, indexed INTEGER NOT NULL, finalized INTEGER NOT NULL) STRICT;";
+const GET_EVENT_BLOCK_SQL: &str = "SELECT indexed, finalized FROM event_block WHERE event = ?1;";
+const SET_EVENT_BLOCK_SQL: &str ="INSERT INTO event_block (event, indexed, finalized) VALUES(?1, ?2, ?3) ON CONFLICT(event) DO UPDATE SET indexed = ?2, finalized = ?3;";
 
 // Separate type because of lifetime issues when creating transactions. Outer struct only stores the connection itself.
 struct SqliteInner {
@@ -75,7 +78,9 @@ struct SqliteInner {
 
 struct PreparedEvent {
     descriptor: EventDescriptor,
-    insert_statements: Vec<PreparedStatement>,
+    insert_statements: Vec<InsertStatement>,
+    // Every statement takes a block number as parameter.
+    remove_statements: Vec<String>,
 }
 
 /// Prepared statements for inserting into event tables. Tables and columns are ordered by `event_visitor`.
@@ -85,7 +90,7 @@ struct PreparedEvent {
 /// - 2: log index
 /// - 3: array index if this is an array table (all tables after the first)
 /// - 3 + n: n-th event field/column
-struct PreparedStatement {
+struct InsertStatement {
     sql: String,
     /// Number of event fields that map to SQL columns. Does not count FIXED_COLUMNS and array index.
     fields: usize,
@@ -93,16 +98,15 @@ struct PreparedStatement {
 
 impl SqliteInner {
     fn new(connection: &Connection) -> Result<Self> {
-        let query = "CREATE TABLE IF NOT EXISTS event_block(event TEXT PRIMARY KEY NOT NULL , block INTEGER NOT NULL) STRICT;";
         connection
-            .execute(query, ())
-            .context("create block table")?;
+            .execute(EVENT_BLOCK_SQL, ())
+            .context("create event_block table")?;
 
         connection
-            .prepare_cached(SET_EVENT_BLOCK_SQL)
+            .prepare_cached(GET_EVENT_BLOCK_SQL)
             .context("prepare get_event_block")?;
         connection
-            .prepare_cached(GET_EVENT_BLOCK_SQL)
+            .prepare_cached(SET_EVENT_BLOCK_SQL)
             .context("prepare set_event_block")?;
 
         Ok(Self {
@@ -129,18 +133,14 @@ impl SqliteInner {
         let mut statement = connection
             .prepare_cached(GET_EVENT_BLOCK_SQL)
             .context("prepare_cached")?;
-        let block: Option<i64> = statement
-            .query_row((name,), |row| row.get(0))
+        let block: Option<(i64, i64)> = statement
+            .query_row((name,), |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()
             .context("query_row")?;
-        let indexed = block
-            .map(u64::try_from)
-            .transpose()
-            .context("negative block number")?;
-
-        Ok(indexed.map(|indexed| database::Block {
-            indexed,
-            finalized: 0, // TODO
+        let Some((indexed, finalized)) = block else { return Ok(None) };
+        Ok(Some(database::Block {
+            indexed: indexed.try_into().context("indexed out of bounds")?,
+            finalized: finalized.try_into().context("finalized out of bounds")?,
         }))
     }
 
@@ -156,14 +156,19 @@ impl SqliteInner {
             if !self.events.contains_key(block.event) {
                 return Err(anyhow!("event {} wasn't prepared", block.event));
             }
-            let block_number: i64 = block
+            let indexed: i64 = block
                 .block
                 .indexed
                 .try_into()
-                .context("block number doesn't fit in i64")?;
+                .context("indexed out of bounds")?;
+            let finalized: i64 = block
+                .block
+                .finalized
+                .try_into()
+                .context("finalized out of bounds")?;
             // TODO: handle block.finalized
             statement
-                .execute((block.event, block_number))
+                .execute((block.event, indexed, finalized))
                 .context("execute")?;
         }
         Ok(())
@@ -215,7 +220,7 @@ impl SqliteInner {
         write!(&mut sql, "COMMIT;").unwrap();
         tracing::debug!("creating table:\n{}", sql);
 
-        let insert_statements: Vec<PreparedStatement> = tables
+        let insert_statements: Vec<InsertStatement> = tables
             .iter()
             .enumerate()
             .map(|(i, table)| {
@@ -228,11 +233,15 @@ impl SqliteInner {
                 assert_eq!(sql.pop(), Some(','));
                 write!(&mut sql, ");").unwrap();
                 tracing::debug!("creating insert statement:\n{}", sql);
-                PreparedStatement {
+                InsertStatement {
                     sql,
                     fields: table.0.len(),
                 }
             })
+            .collect();
+
+        let remove_statements: Vec<String> = (0..tables.len())
+            .map(|i| format!("DELETE FROM {name}_{i} WHERE block_number >= ?1;"))
             .collect();
 
         connection.execute_batch(&sql).context("table creation")?;
@@ -241,7 +250,12 @@ impl SqliteInner {
         for statement in &insert_statements {
             connection
                 .prepare_cached(&statement.sql)
-                .context("invalid prepared statement")?;
+                .context("invalid prepared insert statement")?;
+        }
+        for statement in &remove_statements {
+            connection
+                .prepare_cached(statement)
+                .context("invalid prepared remove statement")?;
         }
 
         self.events.insert(
@@ -249,6 +263,7 @@ impl SqliteInner {
             PreparedEvent {
                 descriptor: event.clone(),
                 insert_statements,
+                remove_statements,
             },
         );
 
@@ -337,12 +352,11 @@ impl SqliteInner {
             ToSqlOutput::Owned(SqlValue::Integer((*transaction_index).try_into().unwrap()));
         let address = ToSqlOutput::Borrowed(SqlValueRef::Blob(&address.0));
         for (i, (statement, values)) in event.insert_statements.iter().zip(sql_values).enumerate() {
-            assert!(values.len() % statement.fields == 0);
             let is_array = i != 0;
             let mut statement_ = connection
                 .prepare_cached(&statement.sql)
                 .context("prepare_cached")?;
-            for (i, row) in values.chunks_exact(statement.fields).enumerate() {
+            let mut insert = |i: usize, row: &[ToSqlOutput]| {
                 let array_index = if is_array {
                     Some(ToSqlOutput::Owned(SqlValue::Integer(i.try_into().unwrap())))
                 } else {
@@ -354,7 +368,15 @@ impl SqliteInner {
                         .chain(array_index.as_ref())
                         .chain(row),
                 );
-                statement_.insert(params).context("insert")?;
+                statement_.insert(params).context("insert")
+            };
+            if values.is_empty() {
+                insert(0, &[])?;
+            } else {
+                assert!(values.len() % statement.fields == 0);
+                for (i, row) in values.chunks_exact(statement.fields).enumerate() {
+                    insert(i, row)?;
+                }
             }
         }
 
@@ -371,6 +393,21 @@ impl SqliteInner {
             .context("set_event_blocks")?;
         for log in logs {
             self.store_event(connection, log).context("store_event")?;
+        }
+        Ok(())
+    }
+
+    fn remove(&self, connection: &Connection, uncles: &[database::Uncle]) -> Result<()> {
+        for uncle in uncles {
+            let name = Self::internal_event_name(uncle.event);
+            let block = i64::try_from(uncle.number).context("block out of bounds")?;
+            let prepared = self.events.get(&name).context("unprepared event")?;
+            for statement in &prepared.remove_statements {
+                let mut statement = connection
+                    .prepare_cached(statement)
+                    .context("prepare_cached")?;
+                statement.execute((block,)).context("execute")?;
+            }
         }
         Ok(())
     }
@@ -626,7 +663,7 @@ mod tests {
             event: "event",
             block: database::Block {
                 indexed: 2,
-                finalized: 1,
+                finalized: 3,
             },
         };
         sqlite.update(&[blocks], &[]).unwrap();
@@ -635,8 +672,79 @@ mod tests {
             result,
             Some(database::Block {
                 indexed: 2,
-                finalized: 0, // TODO
+                finalized: 3,
             })
         );
+    }
+
+    #[test]
+    fn remove() {
+        let mut sqlite = Sqlite::new_for_test();
+        sqlite
+            .prepare_event("event", &event_descriptor(vec![]))
+            .unwrap();
+        sqlite
+            .prepare_event("eventAAA", &event_descriptor(vec![]))
+            .unwrap();
+        sqlite
+            .update(
+                &[],
+                &[
+                    Log {
+                        event: "event",
+                        block_number: 1,
+                        ..Default::default()
+                    },
+                    Log {
+                        event: "event",
+                        block_number: 2,
+                        ..Default::default()
+                    },
+                    Log {
+                        event: "event",
+                        block_number: 5,
+                        ..Default::default()
+                    },
+                    Log {
+                        event: "event",
+                        block_number: 6,
+                        ..Default::default()
+                    },
+                ],
+            )
+            .unwrap();
+
+        let rows = |sqlite: &Sqlite| {
+            let count: i64 = sqlite
+                .connection
+                .query_row("SELECT COUNT(*) FROM event_0", (), |row| row.get(0))
+                .unwrap();
+            count
+        };
+        assert_eq!(rows(&sqlite), 4);
+
+        sqlite
+            .remove(&[database::Uncle {
+                event: "event",
+                number: 6,
+            }])
+            .unwrap();
+        assert_eq!(rows(&sqlite), 3);
+
+        sqlite
+            .remove(&[database::Uncle {
+                event: "eventAAA",
+                number: 0,
+            }])
+            .unwrap();
+        assert_eq!(rows(&sqlite), 3);
+
+        sqlite
+            .remove(&[database::Uncle {
+                event: "event",
+                number: 0,
+            }])
+            .unwrap();
+        assert_eq!(rows(&sqlite), 0);
     }
 }

@@ -32,7 +32,7 @@ pub struct Uncle<'a> {
 }
 
 /// An emitted event log.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Log<'a> {
     pub event: &'a str,
     pub block_number: u64,

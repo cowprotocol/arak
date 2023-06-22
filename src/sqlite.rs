@@ -309,10 +309,10 @@ impl SqliteInner {
                     return;
                 }
                 VisitValue::Value(AbiValue::Int(v)) => {
-                    ToSqlOutput::Owned(SqlValue::Blob(v.to_be_bytes().to_vec()))
+                    ToSqlOutput::Owned(SqlValue::Blob(v.get().to_be_bytes().to_vec()))
                 }
                 VisitValue::Value(AbiValue::Uint(v)) => {
-                    ToSqlOutput::Owned(SqlValue::Blob(v.to_be_bytes().to_vec()))
+                    ToSqlOutput::Owned(SqlValue::Blob(v.get().to_be_bytes().to_vec()))
                 }
                 VisitValue::Value(AbiValue::Address(v)) => {
                     ToSqlOutput::Borrowed(SqlValueRef::Blob(&v.0))
@@ -321,7 +321,7 @@ impl SqliteInner {
                     ToSqlOutput::Owned(SqlValue::Integer(*v as i64))
                 }
                 VisitValue::Value(AbiValue::FixedBytes(v)) => {
-                    ToSqlOutput::Borrowed(SqlValueRef::Blob(v))
+                    ToSqlOutput::Borrowed(SqlValueRef::Blob(v.as_bytes()))
                 }
                 VisitValue::Value(AbiValue::Function(v)) => ToSqlOutput::Owned(SqlValue::Blob(
                     v.address

@@ -1,8 +1,6 @@
 // TODO:
 // - Would be nicer as iterators.
 
-use std::ops::Deref;
-
 use solabi::value::{Value, ValueKind};
 
 pub enum VisitKind<'a> {
@@ -52,13 +50,13 @@ pub fn visit_value<'a>(value: &'a Value, visitor: &mut impl FnMut(VisitValue<'a>
             }
         }
         Value::FixedArray(array) => {
-            for value in array.deref() {
+            for value in array.as_slice() {
                 visit_value(value, visitor);
             }
         }
         Value::Array(array) => {
             visitor(VisitValue::ArrayStart(array.len()));
-            for value in array.deref() {
+            for value in array.as_slice() {
                 visit_value(value, visitor);
             }
             visitor(VisitValue::ArrayEnd);

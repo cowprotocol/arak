@@ -11,7 +11,11 @@ use solabi::{
     abi::EventDescriptor,
     value::{Value as AbiValue, ValueKind as AbiKind},
 };
-use std::{collections::HashMap, fmt::Write, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+    path::Path,
+};
 
 pub struct Sqlite {
     connection: Connection,
@@ -117,11 +121,32 @@ impl SqliteInner {
         })
     }
 
+    fn is_allowed_character(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_'
+    }
+
     /// Sanitize event name so it will work as a SQL table name.
     fn internal_event_name(name: &str) -> String {
-        name.chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect()
+        let mut result: String = name
+            .chars()
+            .filter(|c| Self::is_allowed_character(*c))
+            .collect();
+        if result.is_empty() || !result.chars().next().unwrap().is_ascii_alphabetic() {
+            result.insert(0, 'e');
+        }
+        result
+    }
+
+    /// Sanitize field name so it will work as a SQL column name.
+    fn internal_column_name(name: &str) -> String {
+        let mut result: String = name
+            .chars()
+            .filter(|c| Self::is_allowed_character(*c))
+            .collect();
+        if result.is_empty() || !result.chars().next().unwrap().is_ascii_alphabetic() {
+            result.insert(0, 'c');
+        }
+        result
     }
 
     fn _read_event(
@@ -188,6 +213,17 @@ impl SqliteInner {
     ) -> Result<()> {
         let name = Self::internal_event_name(name);
 
+        let mut column_names = Vec::<String>::new();
+        let mut column_names_ = HashSet::<String>::new();
+        for input in &event.inputs {
+            let name = Self::internal_column_name(&input.field.name);
+            if column_names_.contains(&name) {
+                return Err(anyhow!("duplicate field name {:?}", name));
+            }
+            column_names.push(name.clone());
+            column_names_.insert(name);
+        }
+
         if let Some(existing) = self.events.get(&name) {
             if event != &existing.descriptor {
                 return Err(anyhow!(
@@ -210,7 +246,12 @@ impl SqliteInner {
             if i != 0 {
                 write!(&mut sql, "{ARRAY_COLUMN}, ").unwrap();
             }
-            for (i, column) in table.0.iter().enumerate() {
+            for (j, column) in table.0.iter().enumerate() {
+                if i == 0 {
+                    write!(&mut sql, "{}", &column_names[j]).unwrap();
+                } else {
+                    write!(&mut sql, "c{j}").unwrap();
+                };
                 let type_ = match column.0 {
                     SqlType::Null => unreachable!(),
                     SqlType::Integer => "INTEGER",
@@ -218,7 +259,7 @@ impl SqliteInner {
                     SqlType::Text => "TEXT",
                     SqlType::Blob => "BLOB",
                 };
-                write!(&mut sql, "c{i} {type_}, ").unwrap();
+                write!(&mut sql, " {type_}, ").unwrap();
             }
             let primary_key = if i == 0 {
                 FIXED_PRIMARY_KEY
@@ -524,9 +565,10 @@ mod tests {
             name: Default::default(),
             inputs: values
                 .into_iter()
-                .map(|value| EventField {
+                .enumerate()
+                .map(|(i, value)| EventField {
                     field: Field {
-                        name: Default::default(),
+                        name: format!("field {i}"),
                         kind: value,
                         components: Default::default(),
                         internal_type: Default::default(),
@@ -662,8 +704,9 @@ mod tests {
         while let Some(row) = rows.next().unwrap() {
             assert_eq!(row.as_ref().column_count(), FIXED_COLUMNS + 8);
             for i in 0..row.as_ref().column_count() {
-                let column = row.get_ref(i).unwrap();
-                println!("{:?}", column);
+                let name = row.as_ref().column_name(i).unwrap();
+                let value = row.get_ref(i).unwrap();
+                println!("{name}: {value:?}");
             }
             println!();
         }

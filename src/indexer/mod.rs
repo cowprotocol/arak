@@ -130,9 +130,12 @@ where
             let blocks = adapters
                 .iter()
                 .copied()
-                .map(|adapter| database::IndexedBlock {
+                .map(|adapter| database::EventBlock {
                     event: adapter.name(),
-                    number: to,
+                    block: database::Block {
+                        indexed: to,
+                        finalized: finalized.number.as_u64(),
+                    },
                 })
                 .collect::<Vec<_>>();
             let logs = adapters
@@ -215,9 +218,12 @@ where
         let blocks = self
             .adapters
             .iter()
-            .map(|adapter| database::IndexedBlock {
+            .map(|adapter| database::EventBlock {
                 event: adapter.name(),
-                number: next.number.as_u64(),
+                block: database::Block {
+                    indexed: next.number.as_u64(),
+                    finalized: finalized.number.as_u64(),
+                },
             })
             .collect::<Vec<_>>();
         let logs = self
@@ -239,7 +245,11 @@ where
             .map(|adapter| {
                 Ok(cmp::max(
                     adapter.start(),
-                    self.database.event_block(adapter.name())?.unwrap_or(0) + 1,
+                    self.database
+                        .event_block(adapter.name())?
+                        .unwrap_or_default()
+                        .indexed
+                        + 1,
                 ))
             })
             .collect()

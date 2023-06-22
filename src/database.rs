@@ -10,9 +10,23 @@ use std::{
     iter,
 };
 
-/// The last indexed block for a given event.
+/// Block indexing information.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Block {
+    pub indexed: u64,
+    pub finalized: u64,
+}
+
+/// Block indexing information attached to an event.
 #[derive(Debug)]
-pub struct IndexedBlock<'a> {
+pub struct EventBlock<'a> {
+    pub event: &'a str,
+    pub block: Block,
+}
+
+/// An uncled block. All logs for this block or newer are considered invalid.
+#[derive(Debug)]
+pub struct Uncle<'a> {
     pub event: &'a str,
     pub number: u64,
 }
@@ -48,11 +62,11 @@ pub trait Database {
     /// - A table for `name` already exists with an incompatible event signature.
     fn prepare_event(&mut self, name: &str, event: &EventDescriptor) -> Result<()>;
 
-    /// Retrieves the last indexed block for the specified event.
-    fn event_block(&mut self, name: &str) -> Result<Option<u64>>;
+    /// Retrieves the block information for the specified event.
+    fn event_block(&mut self, name: &str) -> Result<Option<Block>>;
 
     /// Updates the storage in a single transaction. It updates two things:
-    /// - `blocks` specifies updates to the last updated block for events; this
+    /// - `blocks` specifies updates to the block information for events; this
     ///   will change the value that is read from `event_block`.
     /// - `logs` specified new logs to append to the database.
     ///
@@ -62,12 +76,19 @@ pub trait Database {
     ///   from one or more of the specified `blocks` or `logs`.
     /// - `fields` do not match the event signature specified in the successful
     ///   call to `prepare_event` with this `event` name for one or more `logs`.
-    fn update(&mut self, blocks: &[IndexedBlock], logs: &[Log]) -> Result<()>;
+    fn update(&mut self, blocks: &[EventBlock], logs: &[Log]) -> Result<()>;
+
+    /// Removes logs from the specified event's uncled blocks.
+    ///
+    /// Additionally the last indexed block is set to the uncled block's parent;
+    /// this changes the `indexed` field of the result from `event_block` for
+    /// the specified events.
+    fn remove(&mut self, uncles: &[Uncle]) -> Result<()>;
 }
 
 #[derive(Default)]
 pub struct Dummy {
-    events: HashMap<String, u64>,
+    events: HashMap<String, Block>,
 }
 
 impl Database for Dummy {
@@ -75,15 +96,15 @@ impl Database for Dummy {
         let hash_map::Entry::Vacant(entry) = self.events.entry(name.to_string()) else {
             anyhow::bail!("duplicate event {name}");
         };
-        entry.insert(0);
+        entry.insert(Block::default());
         Ok(())
     }
 
-    fn event_block(&mut self, name: &str) -> Result<Option<u64>> {
-        Ok(self.events.get(name).copied())
+    fn event_block(&mut self, event: &str) -> Result<Option<Block>> {
+        Ok(self.events.get(event).copied())
     }
 
-    fn update(&mut self, blocks: &[IndexedBlock], logs: &[Log]) -> Result<()> {
+    fn update(&mut self, blocks: &[EventBlock], logs: &[Log]) -> Result<()> {
         let events = iter::empty()
             .chain(blocks.iter().map(|block| block.event))
             .chain(logs.iter().map(|log| log.event));
@@ -92,10 +113,24 @@ impl Database for Dummy {
         }
 
         for block in blocks {
-            *self.events.get_mut(block.event).unwrap() = block.number;
+            *self.events.get_mut(block.event).unwrap() = block.block;
         }
         for log in logs {
             tracing::info!(?log, "added log");
+        }
+
+        Ok(())
+    }
+
+    fn remove(&mut self, uncles: &[Uncle]) -> Result<()> {
+        let events = uncles.iter().map(|uncle| uncle.event);
+        for event in events {
+            anyhow::ensure!(self.events.contains_key(event), "missing event {event}");
+        }
+
+        for uncle in uncles {
+            self.events.get_mut(uncle.event).unwrap().indexed = uncle.number - 1;
+            tracing::info!(block = %uncle.number, "remove uncled logs");
         }
 
         Ok(())

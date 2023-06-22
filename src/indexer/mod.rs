@@ -75,7 +75,32 @@ where
                 .prepare_event(adapter.name(), adapter.signature())?;
         }
 
-        // TODO(nlordell): Clear un-finalized logs from the database.
+        let unfinalized = self
+            .adapters
+            .iter()
+            .filter_map(|adapter| {
+                let block = match self.database.event_block(adapter.name()) {
+                    Ok(value) => value?,
+                    Err(err) => return Some(Err(err)),
+                };
+
+                (block.indexed > block.finalized).then(|| {
+                    Ok(database::Uncle {
+                        event: adapter.name(),
+                        number: block.finalized + 1,
+                    })
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for unfinalized in &unfinalized {
+            tracing::info!(
+                event = %unfinalized.event, finalized = %unfinalized.number,
+                "removing logs for unfinalized blocks"
+            );
+        }
+        if !unfinalized.is_empty() {
+            self.database.remove(&unfinalized)?;
+        }
 
         loop {
             let finalized = self
@@ -154,8 +179,6 @@ where
     async fn sync(&mut self, chain: &mut Chain) -> Result<bool> {
         // TODO(nlordell): Remove reorged blocks and update with new data in a
         // single database transaction.
-        // TODO(nlordell): Check database event indexed block matches.
-        // TODO(nlordell): Update finalized block in the database.
 
         let next = match self
             .eth
@@ -174,12 +197,19 @@ where
                 );
             }
             chain::Append::Reorg => {
-                tracing::debug!(
-                    block = %next.number - 1, hash = %next.parent_hash,
-                    "reorg"
-                );
-                todo!("remove all events on reorged block");
-                //return Ok(true);
+                let block = next.number - 1;
+                tracing::debug!(%block, hash = %next.parent_hash, "reorg");
+
+                let uncles = self
+                    .adapters
+                    .iter()
+                    .map(|adapter| database::Uncle {
+                        event: adapter.name(),
+                        number: block.as_u64(),
+                    })
+                    .collect::<Vec<_>>();
+                self.database.remove(&uncles)?;
+                return Ok(true);
             }
         }
 

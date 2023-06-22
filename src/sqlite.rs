@@ -288,11 +288,21 @@ impl SqliteInner {
             fields,
         }: &'a Log,
     ) -> Result<()> {
-        // TODO:
-        // - Check that the abi values matches the stored EventDescriptor.
-
         let name = Self::internal_event_name(event);
         let event = self.events.get(&name).context("unknown event")?;
+
+        let len = fields.len();
+        let expected_len = event.descriptor.inputs.len();
+        if fields.len() != expected_len {
+            return Err(anyhow!(
+                "event value has {len} fields but should have {expected_len}"
+            ));
+        }
+        for (i, (value, kind)) in fields.iter().zip(&event.descriptor.inputs).enumerate() {
+            if value.kind() != kind.field.kind {
+                return Err(anyhow!("event field {i} doesn't match event descriptor"));
+            }
+        }
 
         // Outer vec maps to tables. Inner vec maps to (array element count, columns).
         let mut sql_values: Vec<(Option<usize>, Vec<ToSqlOutput<'a>>)> = vec![(None, vec![])];
@@ -620,7 +630,7 @@ mod tests {
             AbiValue::Uint(Uint::new(8, 2u32.into()).unwrap()),
             AbiValue::Address(Address([3; 20])),
             AbiValue::Bool(true),
-            AbiValue::FixedBytes(FixedBytes::new(&[4, 5]).unwrap()),
+            AbiValue::FixedBytes(FixedBytes::new(&[4]).unwrap()),
             AbiValue::Function(ExternalFunction {
                 address: Address([6; 20]),
                 selector: Selector([7, 8, 9, 10]),

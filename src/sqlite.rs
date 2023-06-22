@@ -1,5 +1,5 @@
 use crate::{
-    database::{self, Database, IndexedBlock, Log},
+    database::{self, Database, Log},
     event_visitor::{VisitKind, VisitValue},
 };
 use anyhow::{anyhow, Context, Result};
@@ -40,14 +40,18 @@ impl Database for Sqlite {
         self.inner.prepare_event(&self.connection, name, event)
     }
 
-    fn event_block(&mut self, name: &str) -> Result<Option<u64>> {
+    fn event_block(&mut self, name: &str) -> Result<Option<database::Block>> {
         self.inner.event_block(&self.connection, name)
     }
 
-    fn update(&mut self, blocks: &[IndexedBlock], logs: &[database::Log]) -> Result<()> {
+    fn update(&mut self, blocks: &[database::EventBlock], logs: &[database::Log]) -> Result<()> {
         let transaction = self.connection.transaction().context("transaction")?;
         self.inner.update(&transaction, blocks, logs)?;
         transaction.commit().context("commit")
+    }
+
+    fn remove(&mut self, _: &[database::Uncle]) -> Result<()> {
+        todo!()
     }
 }
 
@@ -121,7 +125,7 @@ impl SqliteInner {
         todo!()
     }
 
-    fn event_block(&self, connection: &Connection, name: &str) -> Result<Option<u64>> {
+    fn event_block(&self, connection: &Connection, name: &str) -> Result<Option<database::Block>> {
         let mut statement = connection
             .prepare_cached(GET_EVENT_BLOCK_SQL)
             .context("prepare_cached")?;
@@ -129,13 +133,22 @@ impl SqliteInner {
             .query_row((name,), |row| row.get(0))
             .optional()
             .context("query_row")?;
-        block
+        let indexed = block
             .map(u64::try_from)
             .transpose()
-            .context("negative block number")
+            .context("negative block number")?;
+
+        Ok(indexed.map(|indexed| database::Block {
+            indexed,
+            finalized: 0, // TODO
+        }))
     }
 
-    fn set_event_blocks(&self, connection: &Connection, blocks: &[IndexedBlock]) -> Result<()> {
+    fn set_event_blocks(
+        &self,
+        connection: &Connection,
+        blocks: &[database::EventBlock],
+    ) -> Result<()> {
         let mut statement = connection
             .prepare_cached(SET_EVENT_BLOCK_SQL)
             .context("prepare_cached")?;
@@ -144,9 +157,11 @@ impl SqliteInner {
                 return Err(anyhow!("event {} wasn't prepared", block.event));
             }
             let block_number: i64 = block
-                .number
+                .block
+                .indexed
                 .try_into()
                 .context("block number doesn't fit in i64")?;
+            // TODO: handle block.finalized
             statement
                 .execute((block.event, block_number))
                 .context("execute")?;
@@ -349,7 +364,7 @@ impl SqliteInner {
     fn update(
         &self,
         connection: &Connection,
-        blocks: &[database::IndexedBlock],
+        blocks: &[database::EventBlock],
         logs: &[database::Log],
     ) -> Result<()> {
         self.set_event_blocks(connection, blocks)
@@ -607,12 +622,21 @@ mod tests {
             .unwrap();
         let result = sqlite.event_block("event").unwrap();
         assert_eq!(result, None);
-        let blocks = IndexedBlock {
+        let blocks = database::EventBlock {
             event: "event",
-            number: 1,
+            block: database::Block {
+                indexed: 2,
+                finalized: 1,
+            },
         };
         sqlite.update(&[blocks], &[]).unwrap();
         let result = sqlite.event_block("event").unwrap();
-        assert_eq!(result, Some(1));
+        assert_eq!(
+            result,
+            Some(database::Block {
+                indexed: 2,
+                finalized: 0, // TODO
+            })
+        );
     }
 }

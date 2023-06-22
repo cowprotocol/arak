@@ -166,8 +166,7 @@ where
             let logs = adapters
                 .into_iter()
                 .zip(results)
-                .flat_map(|(adapter, logs)| logs.into_iter().map(move |log| (adapter, log)))
-                .filter_map(|(adapter, log)| database_log(adapter, log))
+                .flat_map(|(adapter, logs)| database_logs(adapter, logs))
                 .collect::<Vec<_>>();
 
             self.database.update(&blocks, &logs)?;
@@ -260,8 +259,7 @@ where
             .adapters
             .iter()
             .zip(results)
-            .flat_map(|(adapter, logs)| logs.into_iter().map(move |log| (adapter, log)))
-            .filter_map(|(adapter, log)| database_log(adapter, log))
+            .flat_map(|(adapter, logs)| database_logs(adapter, logs))
             .collect::<Vec<_>>();
 
         self.database.update(&blocks, &logs)?;
@@ -286,21 +284,33 @@ where
     }
 }
 
-fn database_log(adapter: &Adapter, log: ethrpc::types::Log) -> Option<database::Log> {
-    let fields = match adapter.decode(&log.topics, &log.data) {
-        Ok(fields) => fields,
-        Err(err) => {
-            tracing::warn!(?err, ?log, "failed to decode log");
-            return None;
-        }
-    };
+fn database_logs(
+    adapter: &Adapter,
+    logs: Vec<ethrpc::types::Log>,
+) -> impl Iterator<Item = database::Log> {
+    if !logs.is_empty() {
+        tracing::debug!(
+            event = %adapter.name(), logs = %logs.len(),
+            "fetched logs"
+        );
+    }
 
-    Some(database::Log {
-        event: adapter.name(),
-        block_number: log.block_number.as_u64(),
-        log_index: log.log_index.as_u64(),
-        transaction_index: log.transaction_index.as_u64(),
-        address: log.address,
-        fields,
+    logs.into_iter().filter_map(move |log| {
+        let fields = match adapter.decode(&log.topics, &log.data) {
+            Ok(fields) => fields,
+            Err(err) => {
+                tracing::warn!(?err, ?log, "failed to decode log");
+                return None;
+            }
+        };
+
+        Some(database::Log {
+            event: adapter.name(),
+            block_number: log.block_number.as_u64(),
+            log_index: log.log_index.as_u64(),
+            transaction_index: log.transaction_index.as_u64(),
+            address: log.address,
+            fields,
+        })
     })
 }

@@ -64,7 +64,9 @@ impl Database for Sqlite {
 /// 4. address
 const FIXED_COLUMNS: usize = 4;
 const FIXED_COLUMNS_SQL: &str = "block_number INTEGER NOT NULL, log_index INTEGER NOT NULL, transaction_index INTEGER NOT NULL, address BLOB NOT NULL";
-const FIXED_PRIMARY_KEY: &str = "PRIMARY KEY(block_number ASC, log_index ASC)";
+const ARRAY_COLUMN: &str = "array_index INTEGER NOT NULL";
+const FIXED_PRIMARY_KEY: &str = "block_number ASC, log_index ASC";
+const FIXED_PRIMARY_KEY_ARRAY: &str = "block_number ASC, log_index ASC, array_index ASC";
 
 const EVENT_BLOCK_SQL: &str = "CREATE TABLE IF NOT EXISTS event_block(event TEXT PRIMARY KEY NOT NULL, indexed INTEGER NOT NULL, finalized INTEGER NOT NULL) STRICT;";
 const GET_EVENT_BLOCK_SQL: &str = "SELECT indexed, finalized FROM event_block WHERE event = ?1;";
@@ -90,6 +92,7 @@ struct PreparedEvent {
 /// - 2: log index
 /// - 3: array index if this is an array table (all tables after the first)
 /// - 3 + n: n-th event field/column
+#[derive(Debug)]
 struct InsertStatement {
     sql: String,
     /// Number of event fields that map to SQL columns. Does not count FIXED_COLUMNS and array index.
@@ -166,7 +169,6 @@ impl SqliteInner {
                 .finalized
                 .try_into()
                 .context("finalized out of bounds")?;
-            // TODO: handle block.finalized
             statement
                 .execute((block.event, indexed, finalized))
                 .context("execute")?;
@@ -202,8 +204,7 @@ impl SqliteInner {
             write!(&mut sql, "CREATE TABLE IF NOT EXISTS {name}_{i} (").unwrap();
             write!(&mut sql, "{FIXED_COLUMNS_SQL}, ").unwrap();
             if i != 0 {
-                // This is an Array table.
-                write!(&mut sql, "array_index INTEGER NOT NULL, ").unwrap();
+                write!(&mut sql, "{ARRAY_COLUMN}, ").unwrap();
             }
             for (i, column) in table.0.iter().enumerate() {
                 let type_ = match column.0 {
@@ -215,7 +216,12 @@ impl SqliteInner {
                 };
                 write!(&mut sql, "c{i} {type_}, ").unwrap();
             }
-            writeln!(&mut sql, "{FIXED_PRIMARY_KEY}) STRICT;").unwrap();
+            let primary_key = if i == 0 {
+                FIXED_PRIMARY_KEY
+            } else {
+                FIXED_PRIMARY_KEY_ARRAY
+            };
+            writeln!(&mut sql, "PRIMARY KEY({primary_key})) STRICT;").unwrap();
         }
         write!(&mut sql, "COMMIT;").unwrap();
         tracing::debug!("creating table:\n{}", sql);
@@ -288,13 +294,13 @@ impl SqliteInner {
         let name = Self::internal_event_name(event);
         let event = self.events.get(&name).context("unknown event")?;
 
-        // Outer vec maps to tables. Inner vec maps to columns.
-        let mut sql_values: Vec<Vec<ToSqlOutput<'a>>> = vec![vec![]];
+        // Outer vec maps to tables. Inner vec maps to (array element count, columns).
+        let mut sql_values: Vec<(Option<usize>, Vec<ToSqlOutput<'a>>)> = vec![(None, vec![])];
         let mut in_array: bool = false;
         let mut visitor = |value: VisitValue<'a>| {
             let sql_value = match value {
-                VisitValue::ArrayStart => {
-                    sql_values.push(Vec::new());
+                VisitValue::ArrayStart(len) => {
+                    sql_values.push((Some(len), Vec::new()));
                     in_array = true;
                     return;
                 }
@@ -339,6 +345,7 @@ impl SqliteInner {
                 <[_]>::first_mut
             })(&mut sql_values)
             .unwrap()
+            .1
             .push(sql_value);
         };
         for value in fields {
@@ -351,12 +358,17 @@ impl SqliteInner {
         let transaction_index =
             ToSqlOutput::Owned(SqlValue::Integer((*transaction_index).try_into().unwrap()));
         let address = ToSqlOutput::Borrowed(SqlValueRef::Blob(&address.0));
-        for (i, (statement, values)) in event.insert_statements.iter().zip(sql_values).enumerate() {
-            let is_array = i != 0;
+        for (statement, (array_element_count, values)) in
+            event.insert_statements.iter().zip(sql_values)
+        {
             let mut statement_ = connection
                 .prepare_cached(&statement.sql)
                 .context("prepare_cached")?;
-            let mut insert = |i: usize, row: &[ToSqlOutput]| {
+            let is_array = array_element_count.is_some();
+            let array_element_count = array_element_count.unwrap_or(1);
+            assert_eq!(statement.fields * array_element_count, values.len());
+            for i in 0..array_element_count {
+                let row = &values[i * statement.fields..][..statement.fields];
                 let array_index = if is_array {
                     Some(ToSqlOutput::Owned(SqlValue::Integer(i.try_into().unwrap())))
                 } else {
@@ -368,15 +380,7 @@ impl SqliteInner {
                         .chain(array_index.as_ref())
                         .chain(row),
                 );
-                statement_.insert(params).context("insert")
-            };
-            if values.is_empty() {
-                insert(0, &[])?;
-            } else {
-                assert!(values.len() % statement.fields == 0);
-                for (i, row) in values.chunks_exact(statement.fields).enumerate() {
-                    insert(i, row)?;
-                }
+                statement_.insert(params).context("insert")?;
             }
         }
 
@@ -491,7 +495,7 @@ mod tests {
         abi::{EventField, Field},
         ethprim::Address,
         function::{ExternalFunction, Selector},
-        value::{BitWidth, ByteLength, FixedBytes, Int, Uint},
+        value::{Array, BitWidth, ByteLength, FixedBytes, Int, Uint},
     };
 
     use super::*;
@@ -643,6 +647,69 @@ mod tests {
         let mut rows = statement.query(()).unwrap();
         while let Some(row) = rows.next().unwrap() {
             assert_eq!(row.as_ref().column_count(), FIXED_COLUMNS + 8);
+            for i in 0..row.as_ref().column_count() {
+                let column = row.get_ref(i).unwrap();
+                println!("{:?}", column);
+            }
+            println!();
+        }
+    }
+
+    #[test]
+    fn with_array() {
+        let mut sqlite = Sqlite::new_for_test();
+        let values = vec![AbiKind::Array(Box::new(AbiKind::Tuple(vec![
+            AbiKind::Bool,
+            AbiKind::String,
+        ])))];
+        let event = event_descriptor(values);
+        sqlite.prepare_event("event1", &event).unwrap();
+
+        let log = Log {
+            event: "event1",
+            block_number: 0,
+            fields: vec![AbiValue::Array(
+                Array::from_values(vec![
+                    AbiValue::Tuple(vec![
+                        AbiValue::Bool(false),
+                        AbiValue::String("hello".to_string()),
+                    ]),
+                    AbiValue::Tuple(vec![
+                        AbiValue::Bool(true),
+                        AbiValue::String("world".to_string()),
+                    ]),
+                ])
+                .unwrap(),
+            )],
+            ..Default::default()
+        };
+        sqlite.inner.store_event(&sqlite.connection, &log).unwrap();
+
+        let log = Log {
+            event: "event1",
+            block_number: 1,
+            fields: vec![AbiValue::Array(
+                Array::new(AbiKind::Tuple(vec![AbiKind::Bool, AbiKind::String]), vec![]).unwrap(),
+            )],
+            ..Default::default()
+        };
+        sqlite.inner.store_event(&sqlite.connection, &log).unwrap();
+
+        let mut statement = sqlite.connection.prepare("SELECT * from event1_0").unwrap();
+        let mut rows = statement.query(()).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            assert_eq!(row.as_ref().column_count(), FIXED_COLUMNS);
+            for i in 0..row.as_ref().column_count() {
+                let column = row.get_ref(i).unwrap();
+                println!("{:?}", column);
+            }
+            println!();
+        }
+
+        let mut statement = sqlite.connection.prepare("SELECT * from event1_1").unwrap();
+        let mut rows = statement.query(()).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            assert_eq!(row.as_ref().column_count(), FIXED_COLUMNS + 3);
             for i in 0..row.as_ref().column_count() {
                 let column = row.get_ref(i).unwrap();
                 println!("{:?}", column);

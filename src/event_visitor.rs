@@ -38,7 +38,7 @@ pub fn visit_kind<'a>(value: &'a ValueKind, visitor: &mut impl FnMut(VisitKind<'
 }
 
 pub enum VisitValue<'a> {
-    ArrayStart,
+    ArrayStart(usize),
     ArrayEnd,
     Value(&'a Value),
 }
@@ -57,7 +57,7 @@ pub fn visit_value<'a>(value: &'a Value, visitor: &mut impl FnMut(VisitValue<'a>
             }
         }
         Value::Array(array) => {
-            visitor(VisitValue::ArrayStart);
+            visitor(VisitValue::ArrayStart(array.len()));
             for value in array.deref() {
                 visit_value(value, visitor);
             }

@@ -3,6 +3,7 @@ mod database;
 mod event_visitor;
 mod indexer;
 mod sqlite;
+mod sqlite_keywords;
 
 use self::{config::Config, indexer::Indexer};
 use anyhow::{Context, Result};

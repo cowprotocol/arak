@@ -140,9 +140,10 @@ impl SqliteInner {
         if result.is_empty() || !result.chars().next().unwrap().is_ascii_alphabetic() {
             result.insert(0, '_');
         }
+        let lowercase = result.to_ascii_lowercase();
         if crate::sqlite_keywords::SQLITE_KEYWORDS
             .iter()
-            .any(|word| *word == result)
+            .any(|word| *word == lowercase)
         {
             result.push('_');
         }

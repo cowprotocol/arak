@@ -1,5 +1,4 @@
 // TODO:
-// - Make `store_event` take multiple inputs that are stored together in the same transaction.
 // - Implement this for Postgres in addition to Sqlite. Postgres will likely have a native async backend, so we should have the trait be async and internally `spawn_blocking` for use of non async rusqlite.
 // - Think about whether the trait should be Send + Sync and whether methods should take mutable Self.
 
@@ -48,14 +47,9 @@ pub struct Log<'a> {
 pub trait Database {
     /// Prepare the database to store this event in the future.
     ///
-    /// This can lead to a new table being created unless a matching table already exists.
+    /// The database maps the event to tables and columns with native SQL types. For all event tables the primary key is `(block_number, log_index)` plus an array index for values in dynamic arrays.
     ///
-    /// `name` identifies this event. There is one database table per unique name.
-    ///
-    /// The table has columns for the event's fields mapped to native SQL types. Additionally, every table has the following columns:
-    ///
-    /// `block_number` and `log_index` form the primary key.
-    /// `address` stores the address from which an event was emitted.
+    /// `name` identifies this event. Database tables for this event are prefixed with the name.
     ///
     /// Errors:
     ///

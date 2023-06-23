@@ -44,6 +44,8 @@ pub struct Log<'a> {
 /// Abstraction over specific SQL like backends.
 ///
 /// Note that the methods are blocking. If you call them from async code, make sure you handle this correctly. With Tokio you could use `spawn_blocking`.
+///
+/// All methods either succeed in full or error without having applied any changes. This is accomplished by using SQL transactions.
 pub trait Database {
     /// Prepare the database to store this event in the future.
     ///
@@ -59,7 +61,7 @@ pub trait Database {
     /// Retrieves the block information for the specified event.
     fn event_block(&mut self, name: &str) -> Result<Option<Block>>;
 
-    /// Updates the storage in a single transaction. It updates two things:
+    /// It updates two things:
     /// - `blocks` specifies updates to the block information for events; this
     ///   will change the value that is read from `event_block`.
     /// - `logs` specified new logs to append to the database.

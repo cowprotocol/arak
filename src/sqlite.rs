@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{
     types::{ToSqlOutput, Type as SqlType, Value as SqlValue, ValueRef as SqlValueRef},
-    Connection, OptionalExtension,
+    Connection, OptionalExtension, Transaction,
 };
 use solabi::{
     abi::EventDescriptor,
@@ -41,7 +41,9 @@ impl Sqlite {
 
 impl Database for Sqlite {
     fn prepare_event(&mut self, name: &str, event: &EventDescriptor) -> Result<()> {
-        self.inner.prepare_event(&self.connection, name, event)
+        let transaction = self.connection.transaction().context("transaction")?;
+        self.inner.prepare_event(&transaction, name, event)?;
+        transaction.commit().context("commit")
     }
 
     fn event_block(&mut self, name: &str) -> Result<Option<database::Block>> {
@@ -88,7 +90,6 @@ struct SqliteInner {
 /// The order of tables and fields is given by the `event_visitor` module.
 struct PreparedEvent {
     descriptor: EventDescriptor,
-    /// Prepared statements for inserting.
     insert_statements: Vec<InsertStatement>,
     /// Prepared statements for removing rows starting at some block number.
     /// Every statement takes a block number as parameter.
@@ -157,22 +158,23 @@ impl SqliteInner {
     }
 
     /*
-    fn read_event(
-        &self,
-        c: &Connection,
-        name: &str,
-        block_number: u64,
-        log_index: u64,
-    ) -> Result<Vec<AbiValue>> {
-        let name = Self::internal_event_name(name);
-        let event = self.events.get(&name).context("unknown event")?;
-        todo!()
-    }
+        fn read_event(
+            &self,
+            c: &Connection,
+            name: &str,
+            block_number: u64,
+            log_index: u64,
+        ) -> Result<Vec<AbiValue>> {
+            let name = Self::internal_event_name(name);
+            let event = self.events.get(&name).context("unknown event")?;
+
+            todo!()
+        }
     */
 
-    fn event_block(&self, connection: &Connection, name: &str) -> Result<Option<database::Block>> {
+    fn event_block(&self, con: &Connection, name: &str) -> Result<Option<database::Block>> {
         let name = Self::internal_event_name(name);
-        let mut statement = connection
+        let mut statement = con
             .prepare_cached(GET_EVENT_BLOCK)
             .context("prepare_cached")?;
         let block: Option<(i64, i64)> = statement
@@ -186,12 +188,8 @@ impl SqliteInner {
         }))
     }
 
-    fn set_event_blocks(
-        &self,
-        connection: &Connection,
-        blocks: &[database::EventBlock],
-    ) -> Result<()> {
-        let mut statement = connection
+    fn set_event_blocks(&self, con: &Transaction, blocks: &[database::EventBlock]) -> Result<()> {
+        let mut statement = con
             .prepare_cached(SET_EVENT_BLOCK)
             .context("prepare_cached")?;
         for block in blocks {
@@ -218,7 +216,7 @@ impl SqliteInner {
 
     fn prepare_event(
         &mut self,
-        connection: &Connection,
+        con: &Transaction,
         name: &str,
         event: &EventDescriptor,
     ) -> Result<()> {
@@ -249,9 +247,8 @@ impl SqliteInner {
         // - Maybe have `CHECK` clauses to enforce things like address and integers having expected length.
 
         let tables = event_to_tables(event).context("unsupported event")?;
-        let mut sql = String::new();
-        writeln!(&mut sql, "BEGIN;").unwrap();
         for (i, table) in tables.iter().enumerate() {
+            let mut sql = String::new();
             write!(&mut sql, "CREATE TABLE IF NOT EXISTS {name}_{i} (").unwrap();
             write!(&mut sql, "{FIXED_COLUMNS}, ").unwrap();
             if i != 0 {
@@ -277,10 +274,10 @@ impl SqliteInner {
             } else {
                 PRIMARY_KEY_ARRAY
             };
-            writeln!(&mut sql, "PRIMARY KEY({primary_key})) STRICT;").unwrap();
+            write!(&mut sql, "PRIMARY KEY({primary_key})) STRICT;").unwrap();
+            tracing::debug!("creating table:\n{}", sql);
+            con.execute(&sql, ()).context("execute create_table")?;
         }
-        write!(&mut sql, "COMMIT;").unwrap();
-        tracing::debug!("creating table:\n{}", sql);
 
         let insert_statements: Vec<InsertStatement> = tables
             .iter()
@@ -306,17 +303,13 @@ impl SqliteInner {
             .map(|i| format!("DELETE FROM {name}_{i} WHERE block_number >= ?1;"))
             .collect();
 
-        connection.execute_batch(&sql).context("table creation")?;
-
         // Check that prepared statements are valid. Unfortunately we can't distinguish the statement being wrong from other Sqlite errors like being unable to access the database file on disk.
         for statement in &insert_statements {
-            connection
-                .prepare_cached(&statement.sql)
+            con.prepare_cached(&statement.sql)
                 .context("invalid prepared insert statement")?;
         }
         for statement in &remove_statements {
-            connection
-                .prepare_cached(statement)
+            con.prepare_cached(statement)
                 .context("invalid prepared remove statement")?;
         }
 
@@ -334,7 +327,7 @@ impl SqliteInner {
 
     fn store_event<'a>(
         &self,
-        connection: &Connection,
+        con: &Transaction,
         Log {
             event,
             block_number,
@@ -427,7 +420,7 @@ impl SqliteInner {
         for (statement, (array_element_count, values)) in
             event.insert_statements.iter().zip(sql_values)
         {
-            let mut statement_ = connection
+            let mut statement_ = con
                 .prepare_cached(&statement.sql)
                 .context("prepare_cached")?;
             let is_array = array_element_count.is_some();
@@ -455,14 +448,14 @@ impl SqliteInner {
 
     fn update(
         &self,
-        connection: &Connection,
+        con: &Transaction,
         blocks: &[database::EventBlock],
         logs: &[database::Log],
     ) -> Result<()> {
-        self.set_event_blocks(connection, blocks)
+        self.set_event_blocks(con, blocks)
             .context("set_event_blocks")?;
         for log in logs {
-            self.store_event(connection, log).context("store_event")?;
+            self.store_event(con, log).context("store_event")?;
         }
         Ok(())
     }
@@ -575,8 +568,6 @@ mod tests {
         function::{ExternalFunction, Selector},
         value::{Array, BitWidth, ByteLength, FixedBytes, Int, Uint},
     };
-
-    use crate::database::Uncle;
 
     use super::*;
 
@@ -710,17 +701,16 @@ mod tests {
             AbiValue::String("abcd".to_string()),
         ];
         sqlite
-            .inner
-            .store_event(
-                &sqlite.connection,
-                &Log {
+            .update(
+                &[],
+                &[Log {
                     event: "event1",
                     block_number: 1,
                     log_index: 2,
                     transaction_index: 3,
                     address: Address([4; 20]),
                     fields,
-                },
+                }],
             )
             .unwrap();
 
@@ -765,7 +755,7 @@ mod tests {
             )],
             ..Default::default()
         };
-        sqlite.inner.store_event(&sqlite.connection, &log).unwrap();
+        sqlite.update(&[], &[log]).unwrap();
 
         let log = Log {
             event: "event1",
@@ -775,7 +765,7 @@ mod tests {
             )],
             ..Default::default()
         };
-        sqlite.inner.store_event(&sqlite.connection, &log).unwrap();
+        sqlite.update(&[], &[log]).unwrap();
 
         let mut statement = sqlite.connection.prepare("SELECT * from event1_0").unwrap();
         let mut rows = statement.query(()).unwrap();
@@ -873,7 +863,7 @@ mod tests {
         assert_eq!(rows(&sqlite), 4);
 
         sqlite
-            .remove(&[Uncle {
+            .remove(&[database::Uncle {
                 event: "event",
                 number: 6,
             }])
@@ -881,7 +871,7 @@ mod tests {
         assert_eq!(rows(&sqlite), 3);
 
         sqlite
-            .remove(&[Uncle {
+            .remove(&[database::Uncle {
                 event: "eventAAA",
                 number: 1,
             }])
@@ -889,7 +879,7 @@ mod tests {
         assert_eq!(rows(&sqlite), 3);
 
         sqlite
-            .remove(&[Uncle {
+            .remove(&[database::Uncle {
                 event: "event",
                 number: 1,
             }])

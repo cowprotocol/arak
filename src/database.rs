@@ -2,12 +2,8 @@
 // - Implement this for Postgres in addition to Sqlite. Postgres will likely have a native async backend, so we should have the trait be async and internally `spawn_blocking` for use of non async rusqlite.
 // - Think about whether the trait should be Send + Sync and whether methods should take mutable Self.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use solabi::{abi::EventDescriptor, ethprim::Address, value::Value};
-use std::{
-    collections::{hash_map, HashMap},
-    iter,
-};
 
 /// Block indexing information.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -82,55 +78,4 @@ pub trait Database {
     /// this changes the `indexed` field of the result from `event_block` for
     /// the specified events.
     fn remove(&mut self, uncles: &[Uncle]) -> Result<()>;
-}
-
-#[derive(Default)]
-pub struct Dummy {
-    events: HashMap<String, Block>,
-}
-
-impl Database for Dummy {
-    fn prepare_event(&mut self, name: &str, _: &EventDescriptor) -> Result<()> {
-        let hash_map::Entry::Vacant(entry) = self.events.entry(name.to_string()) else {
-            anyhow::bail!("duplicate event {name}");
-        };
-        entry.insert(Block::default());
-        Ok(())
-    }
-
-    fn event_block(&mut self, event: &str) -> Result<Block> {
-        self.events.get(event).copied().context("missing event")
-    }
-
-    fn update(&mut self, blocks: &[EventBlock], logs: &[Log]) -> Result<()> {
-        let events = iter::empty()
-            .chain(blocks.iter().map(|block| block.event))
-            .chain(logs.iter().map(|log| log.event));
-        for event in events {
-            anyhow::ensure!(self.events.contains_key(event), "missing event {event}");
-        }
-
-        for block in blocks {
-            *self.events.get_mut(block.event).unwrap() = block.block;
-        }
-        for log in logs {
-            tracing::info!(?log, "added log");
-        }
-
-        Ok(())
-    }
-
-    fn remove(&mut self, uncles: &[Uncle]) -> Result<()> {
-        let events = uncles.iter().map(|uncle| uncle.event);
-        for event in events {
-            anyhow::ensure!(self.events.contains_key(event), "missing event {event}");
-        }
-
-        for uncle in uncles {
-            self.events.get_mut(uncle.event).unwrap().indexed = uncle.number - 1;
-            tracing::info!(block = %uncle.number, "remove uncled logs");
-        }
-
-        Ok(())
-    }
 }

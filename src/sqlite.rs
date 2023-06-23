@@ -251,7 +251,8 @@ impl SqliteInner {
                 write!(&mut sql, "{ARRAY_COLUMN}, ").unwrap();
             }
             for (j, column) in table.0.iter().enumerate() {
-                if i == 0 {
+                // TODO: If The length of the vectors is different then there are top level values with tuples. Current code doesn't handle tuples.
+                if i == 0 && column_names.len() == table.0.len() {
                     write!(&mut sql, "{}", &column_names[j]).unwrap();
                 } else {
                     write!(&mut sql, "c{j}").unwrap();
@@ -884,5 +885,37 @@ mod tests {
             }])
             .unwrap();
         assert_eq!(rows(&sqlite), 0);
+    }
+
+    #[test]
+    fn named_tuple() {
+        let event = r#"
+event OrderPlacement(
+    address indexed sender,
+    (
+      address sellToken,
+      address buyToken,
+      address receiver,
+      uint256 sellAmount,
+      uint256 buyAmount,
+      uint32 validTo,
+      bytes32 appData,
+      uint256 feeAmount,
+      bytes32 kind,
+      bool partiallyFillable,
+      bytes32 sellTokenBalance,
+      bytes32 buyTokenBalance
+    ) order,
+    (
+      uint8 scheme,
+      bytes data
+    ) signature,
+    bytes data
+  )
+"#;
+        let event = EventDescriptor::parse_declaration(event).unwrap();
+        let mut s = Sqlite::new_for_test();
+        s.prepare_event("event", &event).unwrap();
+        // TODO: Check that the column names are right.
     }
 }

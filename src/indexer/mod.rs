@@ -80,7 +80,7 @@ where
             .iter()
             .filter_map(|adapter| {
                 let block = match self.database.event_block(adapter.name()) {
-                    Ok(value) => value?,
+                    Ok(value) => value,
                     Err(err) => return Some(Err(err)),
                 };
 
@@ -273,11 +273,7 @@ where
             .map(|adapter| {
                 Ok(cmp::max(
                     adapter.start(),
-                    self.database
-                        .event_block(adapter.name())?
-                        .unwrap_or_default()
-                        .indexed
-                        + 1,
+                    self.database.event_block(adapter.name())?.indexed + 1,
                 ))
             })
             .collect()

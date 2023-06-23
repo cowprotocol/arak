@@ -2,7 +2,7 @@
 // - Implement this for Postgres in addition to Sqlite. Postgres will likely have a native async backend, so we should have the trait be async and internally `spawn_blocking` for use of non async rusqlite.
 // - Think about whether the trait should be Send + Sync and whether methods should take mutable Self.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use solabi::{abi::EventDescriptor, ethprim::Address, value::Value};
 use std::{
     collections::{hash_map, HashMap},
@@ -53,13 +53,15 @@ pub trait Database {
     ///
     /// `name` identifies this event. Database tables for this event are prefixed with the name.
     ///
+    /// If this is the first time the event has been prepared on this database (the persistent database file, not this instance of the Database trait), then the event's indexed and finalized blocks' (see `event_block`) are set to 0.
+    ///
     /// Errors:
     ///
     /// - A table for `name` already exists with an incompatible event signature.
     fn prepare_event(&mut self, name: &str, event: &EventDescriptor) -> Result<()>;
 
     /// Retrieves the block information for the specified event.
-    fn event_block(&mut self, name: &str) -> Result<Option<Block>>;
+    fn event_block(&mut self, name: &str) -> Result<Block>;
 
     /// It updates two things:
     /// - `blocks` specifies updates to the block information for events; this
@@ -96,8 +98,8 @@ impl Database for Dummy {
         Ok(())
     }
 
-    fn event_block(&mut self, event: &str) -> Result<Option<Block>> {
-        Ok(self.events.get(event).copied())
+    fn event_block(&mut self, event: &str) -> Result<Block> {
+        self.events.get(event).copied().context("missing event")
     }
 
     fn update(&mut self, blocks: &[EventBlock], logs: &[Log]) -> Result<()> {

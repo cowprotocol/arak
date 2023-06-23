@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{
     types::{ToSqlOutput, Type as SqlType, Value as SqlValue, ValueRef as SqlValueRef},
-    Connection, OptionalExtension, Transaction,
+    Connection, Transaction,
 };
 use solabi::{
     abi::EventDescriptor,
@@ -46,7 +46,7 @@ impl Database for Sqlite {
         transaction.commit().context("commit")
     }
 
-    fn event_block(&mut self, name: &str) -> Result<Option<database::Block>> {
+    fn event_block(&mut self, name: &str) -> Result<database::Block> {
         self.inner.event_block(&self.connection, name)
     }
 
@@ -74,7 +74,10 @@ const PRIMARY_KEY_ARRAY: &str = "block_number ASC, log_index ASC, array_index AS
 
 const CREATE_EVENT_BLOCK_TABLE: &str = "CREATE TABLE IF NOT EXISTS event_block(event TEXT PRIMARY KEY NOT NULL, indexed INTEGER NOT NULL, finalized INTEGER NOT NULL) STRICT;";
 const GET_EVENT_BLOCK: &str = "SELECT indexed, finalized FROM event_block WHERE event = ?1;";
-const SET_EVENT_BLOCK: &str ="INSERT INTO event_block (event, indexed, finalized) VALUES(?1, ?2, ?3) ON CONFLICT(event) DO UPDATE SET indexed = ?2, finalized = ?3;";
+const NEW_EVENT_BLOCK: &str =
+    "INSERT INTO event_block (event, indexed, finalized) VALUES(?1, 0, 0) ON CONFLICT(event) DO NOTHING;";
+const SET_EVENT_BLOCK: &str =
+    "UPDATE event_block SET indexed = ?2, finalized = ?3 WHERE event = ?1;";
 const SET_INDEXED_BLOCK: &str = "UPDATE event_block SET indexed = ?2 WHERE event = ?1";
 
 // Separate type because of lifetime issues when creating transactions. Outer struct only stores the connection itself.
@@ -172,20 +175,18 @@ impl SqliteInner {
         }
     */
 
-    fn event_block(&self, con: &Connection, name: &str) -> Result<Option<database::Block>> {
+    fn event_block(&self, con: &Connection, name: &str) -> Result<database::Block> {
         let name = Self::internal_event_name(name);
         let mut statement = con
             .prepare_cached(GET_EVENT_BLOCK)
             .context("prepare_cached")?;
-        let block: Option<(i64, i64)> = statement
+        let block: (i64, i64) = statement
             .query_row((name,), |row| Ok((row.get(0)?, row.get(1)?)))
-            .optional()
             .context("query_row")?;
-        let Some((indexed, finalized)) = block else { return Ok(None) };
-        Ok(Some(database::Block {
-            indexed: indexed.try_into().context("indexed out of bounds")?,
-            finalized: finalized.try_into().context("finalized out of bounds")?,
-        }))
+        Ok(database::Block {
+            indexed: block.0.try_into().context("indexed out of bounds")?,
+            finalized: block.1.try_into().context("finalized out of bounds")?,
+        })
     }
 
     fn set_event_blocks(&self, con: &Transaction, blocks: &[database::EventBlock]) -> Result<()> {
@@ -207,9 +208,14 @@ impl SqliteInner {
                 .finalized
                 .try_into()
                 .context("finalized out of bounds")?;
-            statement
+            let rows = statement
                 .execute((name, indexed, finalized))
                 .context("execute")?;
+            if rows != 1 {
+                return Err(anyhow!(
+                    "query unexpectedly changed {rows} rows instead of 1"
+                ));
+            }
         }
         Ok(())
     }
@@ -278,6 +284,13 @@ impl SqliteInner {
             tracing::debug!("creating table:\n{}", sql);
             con.execute(&sql, ()).context("execute create_table")?;
         }
+
+        let mut new_event_block = con
+            .prepare_cached(NEW_EVENT_BLOCK)
+            .context("prepare new_event_block")?;
+        new_event_block
+            .execute((&name,))
+            .context("execute new_event_block")?;
 
         let insert_statements: Vec<InsertStatement> = tables
             .iter()
@@ -797,7 +810,8 @@ mod tests {
             .prepare_event("event", &event_descriptor(vec![]))
             .unwrap();
         let result = sqlite.event_block("event").unwrap();
-        assert_eq!(result, None);
+        assert_eq!(result.indexed, 0);
+        assert_eq!(result.finalized, 0);
         let blocks = database::EventBlock {
             event: "event",
             block: database::Block {
@@ -807,13 +821,8 @@ mod tests {
         };
         sqlite.update(&[blocks], &[]).unwrap();
         let result = sqlite.event_block("event").unwrap();
-        assert_eq!(
-            result,
-            Some(database::Block {
-                indexed: 2,
-                finalized: 3,
-            })
-        );
+        assert_eq!(result.indexed, 2);
+        assert_eq!(result.finalized, 3);
     }
 
     #[test]

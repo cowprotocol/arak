@@ -132,30 +132,19 @@ impl SqliteInner {
         })
     }
 
-    fn is_allowed_character(c: char) -> bool {
-        c.is_ascii_alphanumeric() || c == '_'
-    }
-
-    /// Sanitize event name so it will work as a SQL table name.
-    fn internal_event_name(name: &str) -> String {
+    fn sanitize_name(name: &str) -> String {
         let mut result: String = name
             .chars()
-            .filter(|c| Self::is_allowed_character(*c))
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
         if result.is_empty() || !result.chars().next().unwrap().is_ascii_alphabetic() {
-            result.insert(0, 'e');
+            result.insert(0, '_');
         }
-        result
-    }
-
-    /// Sanitize field name so it will work as a SQL column name.
-    fn internal_column_name(name: &str) -> String {
-        let mut result: String = name
-            .chars()
-            .filter(|c| Self::is_allowed_character(*c))
-            .collect();
-        if result.is_empty() || !result.chars().next().unwrap().is_ascii_alphabetic() {
-            result.insert(0, 'c');
+        if crate::sqlite_keywords::SQLITE_KEYWORDS
+            .iter()
+            .any(|word| *word == result)
+        {
+            result.push('_');
         }
         result
     }
@@ -176,7 +165,7 @@ impl SqliteInner {
     */
 
     fn event_block(&self, con: &Connection, name: &str) -> Result<database::Block> {
-        let name = Self::internal_event_name(name);
+        let name = Self::sanitize_name(name);
         let mut statement = con
             .prepare_cached(GET_EVENT_BLOCK)
             .context("prepare_cached")?;
@@ -194,7 +183,7 @@ impl SqliteInner {
             .prepare_cached(SET_EVENT_BLOCK)
             .context("prepare_cached")?;
         for block in blocks {
-            let name = Self::internal_event_name(block.event);
+            let name = Self::sanitize_name(block.event);
             if !self.events.contains_key(&name) {
                 return Err(anyhow!("event {name} wasn't prepared"));
             }
@@ -226,12 +215,12 @@ impl SqliteInner {
         name: &str,
         event: &EventDescriptor,
     ) -> Result<()> {
-        let name = Self::internal_event_name(name);
+        let name = Self::sanitize_name(name);
 
         let mut column_names = Vec::<String>::new();
         let mut column_names_ = HashSet::<String>::new();
         for input in &event.inputs {
-            let name = Self::internal_column_name(&input.field.name);
+            let name = Self::sanitize_name(&input.field.name);
             if column_names_.contains(&name) {
                 return Err(anyhow!("duplicate field name {:?}", name));
             }
@@ -350,7 +339,7 @@ impl SqliteInner {
             fields,
         }: &'a Log,
     ) -> Result<()> {
-        let name = Self::internal_event_name(event);
+        let name = Self::sanitize_name(event);
         let event = self.events.get(&name).context("unknown event")?;
 
         let len = fields.len();
@@ -478,7 +467,7 @@ impl SqliteInner {
             .prepare_cached(SET_INDEXED_BLOCK)
             .context("prepare_cached set_indexed_block")?;
         for uncle in uncles {
-            let name = Self::internal_event_name(uncle.event);
+            let name = Self::sanitize_name(uncle.event);
             if uncle.number == 0 {
                 return Err(anyhow!("block 0 got uncled"));
             }

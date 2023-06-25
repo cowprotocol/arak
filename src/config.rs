@@ -8,7 +8,7 @@ use solabi::{
 use std::{
     fmt::{self, Debug, Formatter},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
 use url::Url;
@@ -54,10 +54,16 @@ pub enum Contract {
 }
 
 impl Config {
-    pub fn load(path: &Path) -> Result<Self> {
+    /// Reads a configuration from the specified path, returning the parsed
+    /// configuration and its root path.
+    pub fn load(path: &Path) -> Result<(Self, PathBuf)> {
         let toml = fs::read_to_string(path)?;
         let config = toml::from_str(&toml)?;
-        Ok(config)
+        let root = fs::canonicalize(path)?
+            .parent()
+            .expect("file path without a parent")
+            .to_owned();
+        Ok((config, root))
     }
 }
 

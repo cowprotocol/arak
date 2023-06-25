@@ -99,7 +99,16 @@ impl Database for Sqlite {
         self.inner.event_block(&self.connection, name)
     }
 
-    fn update(&mut self, blocks: &[database::EventBlock], logs: &[database::Log]) -> Result<()> {
+    fn update(
+        &mut self,
+        blocks: &[database::EventBlock],
+        logs: &[database::Log],
+        hooks: &[&str],
+    ) -> Result<()> {
+        if !hooks.is_empty() {
+            todo!("hooks {hooks:?}");
+        }
+
         let transaction = self.connection.transaction().context("transaction")?;
         self.inner.update(&transaction, blocks, logs)?;
         transaction.commit().context("commit")
@@ -764,6 +773,7 @@ mod tests {
                     address: Address([4; 20]),
                     fields,
                 }],
+                &[],
             )
             .unwrap();
 
@@ -808,7 +818,7 @@ mod tests {
             )],
             ..Default::default()
         };
-        sqlite.update(&[], &[log]).unwrap();
+        sqlite.update(&[], &[log], &[]).unwrap();
 
         let log = Log {
             event: "event1",
@@ -818,7 +828,7 @@ mod tests {
             )],
             ..Default::default()
         };
-        sqlite.update(&[], &[log]).unwrap();
+        sqlite.update(&[], &[log], &[]).unwrap();
 
         let mut statement = sqlite.connection.prepare("SELECT * from event1_0").unwrap();
         let mut rows = statement.query(()).unwrap();
@@ -859,7 +869,7 @@ mod tests {
                 finalized: 3,
             },
         };
-        sqlite.update(&[blocks], &[]).unwrap();
+        sqlite.update(&[blocks], &[], &[]).unwrap();
         let result = sqlite.event_block("event").unwrap();
         assert_eq!(result.indexed, 2);
         assert_eq!(result.finalized, 3);
@@ -899,6 +909,7 @@ mod tests {
                         ..Default::default()
                     },
                 ],
+                &[],
             )
             .unwrap();
 

@@ -2,8 +2,9 @@
 
 mod adapter;
 mod chain;
+mod hook;
 
-use self::{adapter::Adapter, chain::Chain};
+use self::{adapter::Adapter, chain::Chain, hook::Hook};
 use crate::{
     config,
     database::{self, Database},
@@ -21,6 +22,7 @@ pub struct Indexer<D> {
     eth: ethrpc::http::Client,
     database: D,
     adapters: Vec<Adapter>,
+    hooks: Vec<Hook>,
 }
 
 /// The indexer run configuration.
@@ -43,6 +45,7 @@ where
         eth: ethrpc::http::Client,
         database: D,
         events: Vec<config::Event>,
+        hooks: Vec<config::Hook>,
     ) -> Result<Self> {
         Ok(Self {
             eth,
@@ -51,6 +54,7 @@ where
                 .into_iter()
                 .map(Adapter::new)
                 .collect::<Result<_>>()?,
+            hooks: hooks.into_iter().map(Hook::new).collect::<Result<_>>()?,
         })
     }
 
@@ -168,8 +172,18 @@ where
                 .zip(results)
                 .flat_map(|(adapter, logs)| database_logs(adapter, logs))
                 .collect::<Vec<_>>();
+            let event = if to == finalized.number.as_u64() {
+                hook::Event::Finalize
+            } else {
+                hook::Event::Init
+            };
+            let hooks = self
+                .hooks
+                .iter()
+                .filter_map(|hook| hook.get(event))
+                .collect::<Vec<_>>();
 
-            self.database.update(&blocks, &logs)?;
+            self.database.update(&blocks, &logs, &hooks)?;
         }
     }
 
@@ -237,13 +251,6 @@ where
             },
         )?;
 
-        if chain.finalize(finalized.number)? != finalized.number {
-            tracing::debug!(
-                block = %finalized.number,
-                "updated finalized block"
-            );
-        }
-
         let blocks = self
             .adapters
             .iter()
@@ -261,8 +268,22 @@ where
             .zip(results)
             .flat_map(|(adapter, logs)| database_logs(adapter, logs))
             .collect::<Vec<_>>();
+        let event = if chain.finalize(finalized.number)? != finalized.number {
+            tracing::debug!(
+                block = %finalized.number,
+                "updated finalized block"
+            );
+            hook::Event::Finalize
+        } else {
+            hook::Event::Block
+        };
+        let hooks = self
+            .hooks
+            .iter()
+            .filter_map(|hook| hook.get(event))
+            .collect::<Vec<_>>();
 
-        self.database.update(&blocks, &logs)?;
+        self.database.update(&blocks, &logs, &hooks)?;
         Ok(true)
     }
 

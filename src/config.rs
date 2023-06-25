@@ -20,8 +20,10 @@ pub struct Config {
     pub database: Url,
     #[serde(default = "indexer::default")]
     pub indexer: Indexer,
-    #[serde(rename = "event")]
+    #[serde(default, rename = "event")]
     pub events: Vec<Event>,
+    #[serde(default, rename = "hook")]
+    pub hooks: Vec<Hook>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +53,28 @@ pub enum Contract {
     #[serde(with = "contract")]
     All,
     Address(Address),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase", tag = "on")]
+pub enum Hook {
+    Block {
+        #[serde(flatten)]
+        source: HookSource,
+    },
+    Finalize {
+        #[serde(flatten)]
+        source: HookSource,
+        #[serde(default = "hook::default_init")]
+        init: bool,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum HookSource {
+    Sql { sql: String },
+    File { file: PathBuf },
 }
 
 impl Config {
@@ -137,6 +161,12 @@ mod duration {
     {
         let secs = f64::deserialize(deserializer)?;
         Ok(Duration::from_secs_f64(secs))
+    }
+}
+
+mod hook {
+    pub fn default_init() -> bool {
+        true
     }
 }
 

@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     let eth = ethrpc::http::Client::new(config.ethrpc);
     let database = database::Sqlite::open(&config.database)?;
 
-    Indexer::create(eth, database, config.events)?
+    Indexer::create(eth, database, config.events, config.hooks)?
         .run(indexer::Run {
             page_size: config.indexer.page_size,
             poll_interval: config.indexer.poll_interval,

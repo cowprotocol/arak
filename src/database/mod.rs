@@ -67,6 +67,9 @@ pub trait Database {
     /// - `blocks` specifies updates to the block information for events; this
     ///   will change the value that is read from `event_block`.
     /// - `logs` specified new logs to append to the database.
+    /// - `hooks` specifies raw SQL queries to run with in the same database
+    ///   transaction as the other updates. Hooks are always run at the end and
+    ///   in order.
     ///
     /// Errors:
     ///
@@ -74,7 +77,8 @@ pub trait Database {
     ///   from one or more of the specified `blocks` or `logs`.
     /// - `fields` do not match the event signature specified in the successful
     ///   call to `prepare_event` with this `event` name for one or more `logs`.
-    fn update(&mut self, blocks: &[EventBlock], logs: &[Log]) -> Result<()>;
+    /// - One or more `hooks` fails to execute
+    fn update(&mut self, blocks: &[EventBlock], logs: &[Log], hooks: &[&str]) -> Result<()>;
 
     /// Removes logs from the specified event's uncled blocks.
     ///

@@ -2,6 +2,10 @@
 // - Implement this for Postgres in addition to Sqlite. Postgres will likely have a native async backend, so we should have the trait be async and internally `spawn_blocking` for use of non async rusqlite.
 // - Think about whether the trait should be Send + Sync and whether methods should take mutable Self.
 
+mod event_visitor;
+mod sqlite;
+
+pub use self::sqlite::Sqlite;
 use anyhow::Result;
 use solabi::{abi::EventDescriptor, ethprim::Address, value::Value};
 

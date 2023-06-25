@@ -1,11 +1,14 @@
-use crate::{
-    database::{self, Database, Log},
-    event_visitor::{VisitKind, VisitValue},
+mod keywords;
+
+use crate::database::{
+    self,
+    event_visitor::{self, VisitKind, VisitValue},
+    Database, Log,
 };
 use anyhow::{anyhow, Context, Result};
 use rusqlite::{
     types::{ToSqlOutput, Type as SqlType, Value as SqlValue, ValueRef as SqlValueRef},
-    Connection, Transaction,
+    Connection, OpenFlags, Transaction,
 };
 use solabi::{
     abi::EventDescriptor,
@@ -13,9 +16,10 @@ use solabi::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    env,
     fmt::Write,
-    path::Path,
 };
+use url::Url;
 
 pub struct Sqlite {
     connection: Connection,
@@ -28,8 +32,53 @@ impl Sqlite {
         Ok(Self { connection, inner })
     }
 
-    pub fn open(path: &Path) -> Result<Self> {
-        Self::new(Connection::open(path)?)
+    /// Opens a new SQLite database backend for the specified URL. The expected
+    /// URL format is `sqlite://[/path[?query]]`. For example:
+    ///
+    /// - `sqlite://` to open and in-memory connection
+    /// - `sqlite:///relative/foo.db` to open the file `relative/foo.db`
+    /// - `sqlite:////absolute/foo.db` to open the file `/absolute/foo.db`
+    ///
+    /// Addionally, query string parameters can be set to configure database
+    /// connection options. See <https://www.sqlite.org/uri.html> for supported
+    /// query string paramters.
+    pub fn open(url: &Url) -> Result<Self> {
+        anyhow::ensure!(url.scheme() == "sqlite", "not an sqlite:// URL");
+        anyhow::ensure!(
+            url.has_authority() && url.authority() == "",
+            "sqlite:// URL requires empty authority"
+        );
+        anyhow::ensure!(
+            url.fragment().is_none(),
+            "sqlite:// URL does not support fragments"
+        );
+
+        if url.path().is_empty() {
+            tracing::debug!("opening in-memory database");
+            return Self::new(Connection::open_in_memory()?);
+        };
+
+        // SQLite 3 supports connection strings as file:// URLs, convert our
+        // `sqlite://` to that.
+        let path = env::current_dir()?.join(
+            url.path()
+                .strip_prefix('/')
+                .expect("can-be-a-base URL not prefixed with /"),
+        );
+        let mut file = Url::from_file_path(path)
+            .ok()
+            .context("invalid sqlite:// URL file path")?;
+        if let Some(query) = url.query() {
+            file.set_query(Some(query));
+        }
+
+        tracing::debug!("opening database {file}");
+        let connection = Connection::open_with_flags(
+            file.as_str(),
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+
+        Self::new(connection)
     }
 
     #[cfg(test)]
@@ -141,7 +190,7 @@ impl SqliteInner {
             result.insert(0, '_');
         }
         let lowercase = result.to_ascii_lowercase();
-        if crate::sqlite_keywords::SQLITE_KEYWORDS
+        if keywords::SQLITE_KEYWORDS
             .iter()
             .any(|word| *word == lowercase)
         {
@@ -412,7 +461,7 @@ impl SqliteInner {
             .push(sql_value);
         };
         for value in fields {
-            crate::event_visitor::visit_value(value, &mut visitor)
+            event_visitor::visit_value(value, &mut visitor)
         }
 
         let block_number =
@@ -531,7 +580,7 @@ fn has_nested_dynamic_arrays(value: &AbiKind) -> bool {
         VisitKind::ArrayEnd => level -= 1,
         VisitKind::Value(_) => (),
     };
-    crate::event_visitor::visit_kind(value, &mut visitor);
+    event_visitor::visit_kind(value, &mut visitor);
     max_level > 1
 }
 
@@ -561,7 +610,7 @@ fn map_value(tables: &mut Vec<Table>, value: &AbiKind) {
         };
         tables[table_index].0.push(Column(type_));
     };
-    crate::event_visitor::visit_kind(value, &mut visitor);
+    event_visitor::visit_kind(value, &mut visitor);
 }
 
 #[cfg(test)]

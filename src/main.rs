@@ -1,14 +1,11 @@
 mod config;
 mod database;
-mod event_visitor;
 mod indexer;
-mod sqlite;
-mod sqlite_keywords;
 
 use self::{config::Config, indexer::Indexer};
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
 #[derive(Parser)]
 struct Arguments {
@@ -21,16 +18,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Arguments::parse();
-    let config = Config::load(&args.config).context("failed to load configuration")?;
+    let (config, root) = Config::load(&args.config).context("failed to load configuration")?;
+    env::set_current_dir(root)?;
 
     let eth = ethrpc::http::Client::new(config.ethrpc);
-    let database = sqlite::Sqlite::open(
-        &config
-            .database
-            .to_file_path()
-            .ok()
-            .context("database must be a file:// URL")?,
-    )?;
+    let database = database::Sqlite::open(&config.database)?;
 
     Indexer::create(eth, database, config.events)?
         .run(indexer::Run {

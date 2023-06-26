@@ -1,8 +1,7 @@
-mod keywords;
-
 use crate::database::{
     self,
-    event_visitor::{self, VisitKind, VisitValue},
+    event_to_tables::Table,
+    event_visitor::{self, VisitValue},
     Database, Log,
 };
 use anyhow::{anyhow, Context, Result};
@@ -14,11 +13,7 @@ use solabi::{
     abi::EventDescriptor,
     value::{Value as AbiValue, ValueKind as AbiKind},
 };
-use std::{
-    collections::{HashMap, HashSet},
-    env,
-    fmt::Write,
-};
+use std::{collections::HashMap, env, fmt::Write};
 use url::Url;
 
 pub struct Sqlite {
@@ -121,17 +116,22 @@ const PRIMARY_KEY: &str = "block_number ASC, log_index ASC";
 const ARRAY_COLUMN: &str = "array_index INTEGER NOT NULL";
 const PRIMARY_KEY_ARRAY: &str = "block_number ASC, log_index ASC, array_index ASC";
 
-const CREATE_EVENT_BLOCK_TABLE: &str = "CREATE TABLE IF NOT EXISTS event_block(event TEXT PRIMARY KEY NOT NULL, indexed INTEGER NOT NULL, finalized INTEGER NOT NULL) STRICT;";
-const GET_EVENT_BLOCK: &str = "SELECT indexed, finalized FROM event_block WHERE event = ?1;";
+const CREATE_EVENT_BLOCK_TABLE: &str = "CREATE TABLE IF NOT EXISTS _event_block(event TEXT PRIMARY KEY NOT NULL, indexed INTEGER NOT NULL, finalized INTEGER NOT NULL) STRICT;";
+const GET_EVENT_BLOCK: &str = "SELECT indexed, finalized FROM _event_block WHERE event = ?1;";
 const NEW_EVENT_BLOCK: &str =
-    "INSERT INTO event_block (event, indexed, finalized) VALUES(?1, 0, 0) ON CONFLICT(event) DO NOTHING;";
+    "INSERT INTO _event_block (event, indexed, finalized) VALUES(?1, 0, 0) ON CONFLICT(event) DO NOTHING;";
 const SET_EVENT_BLOCK: &str =
-    "UPDATE event_block SET indexed = ?2, finalized = ?3 WHERE event = ?1;";
-const SET_INDEXED_BLOCK: &str = "UPDATE event_block SET indexed = ?2 WHERE event = ?1";
+    "UPDATE _event_block SET indexed = ?2, finalized = ?3 WHERE event = ?1;";
+const SET_INDEXED_BLOCK: &str = "UPDATE _event_block SET indexed = ?2 WHERE event = ?1";
+
+const TABLE_EXISTS: &str =
+    "SELECT COUNT(*) > 0 FROM sqlite_schema WHERE type = 'table' AND name = ?1";
 
 // Separate type because of lifetime issues when creating transactions. Outer struct only stores the connection itself.
 struct SqliteInner {
     /// Invariant: Events in the map have corresponding tables in the database.
+    ///
+    /// The key is the `name` argument when the event was passed into `prepare_event`.
     events: HashMap<String, PreparedEvent>,
 }
 
@@ -175,28 +175,13 @@ impl SqliteInner {
         connection
             .prepare_cached(SET_INDEXED_BLOCK)
             .context("prepare set_indexed_block")?;
+        connection
+            .prepare_cached(TABLE_EXISTS)
+            .context("prepare table_exists")?;
 
         Ok(Self {
             events: Default::default(),
         })
-    }
-
-    fn sanitize_name(name: &str) -> String {
-        let mut result: String = name
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if result.is_empty() || !result.chars().next().unwrap().is_ascii_alphabetic() {
-            result.insert(0, '_');
-        }
-        let lowercase = result.to_ascii_lowercase();
-        if keywords::SQLITE_KEYWORDS
-            .iter()
-            .any(|word| *word == lowercase)
-        {
-            result.push('_');
-        }
-        result
     }
 
     /*
@@ -215,7 +200,6 @@ impl SqliteInner {
     */
 
     fn event_block(&self, con: &Connection, name: &str) -> Result<database::Block> {
-        let name = Self::sanitize_name(name);
         let mut statement = con
             .prepare_cached(GET_EVENT_BLOCK)
             .context("prepare_cached")?;
@@ -233,9 +217,8 @@ impl SqliteInner {
             .prepare_cached(SET_EVENT_BLOCK)
             .context("prepare_cached")?;
         for block in blocks {
-            let name = Self::sanitize_name(block.event);
-            if !self.events.contains_key(&name) {
-                return Err(anyhow!("event {name} wasn't prepared"));
+            if !self.events.contains_key(block.event) {
+                return Err(anyhow!("event {} wasn't prepared", block.event));
             }
             let indexed: i64 = block
                 .block
@@ -248,7 +231,7 @@ impl SqliteInner {
                 .try_into()
                 .context("finalized out of bounds")?;
             let rows = statement
-                .execute((name, indexed, finalized))
+                .execute((block.event, indexed, finalized))
                 .context("execute")?;
             if rows != 1 {
                 return Err(anyhow!(
@@ -265,48 +248,35 @@ impl SqliteInner {
         name: &str,
         event: &EventDescriptor,
     ) -> Result<()> {
-        let name = Self::sanitize_name(name);
+        // TODO:
+        // - Check that either no table exists or all tables exist and with the right types.
+        // - Maybe have `CHECK` clauses to enforce things like address and integers having expected length.
+        // - Maybe store serialized event descriptor in the database so we can load and check it.
 
-        let mut column_names = Vec::<String>::new();
-        let mut column_names_ = HashSet::<String>::new();
-        for input in &event.inputs {
-            let name = Self::sanitize_name(&input.field.name);
-            if column_names_.contains(&name) {
-                return Err(anyhow!("duplicate field name {:?}", name));
-            }
-            column_names.push(name.clone());
-            column_names_.insert(name);
-        }
-
-        if let Some(existing) = self.events.get(&name) {
+        if let Some(existing) = self.events.get(name) {
             if event != &existing.descriptor {
                 return Err(anyhow!(
-                    "event {name} already exists with different signature"
+                    "event {} (database name {name}) already exists with different signature",
+                    event.name
                 ));
             }
             return Ok(());
         }
 
-        // TODO:
-        // - Check that either no table exists or all tables exist and with the right types.
-        // - Maybe have `CHECK` clauses to enforce things like address and integers having expected length.
+        let tables =
+            database::event_to_tables::event_to_tables(name, event).context("unsupported event")?;
+        let name = &tables.primary.name;
 
-        let tables = event_to_tables(event).context("unsupported event")?;
-        for (i, table) in tables.iter().enumerate() {
+        let create_table = |is_array: bool, table: &Table| {
             let mut sql = String::new();
-            write!(&mut sql, "CREATE TABLE IF NOT EXISTS {name}_{i} (").unwrap();
+            write!(&mut sql, "CREATE TABLE IF NOT EXISTS {} (", table.name).unwrap();
             write!(&mut sql, "{FIXED_COLUMNS}, ").unwrap();
-            if i != 0 {
+            if is_array {
                 write!(&mut sql, "{ARRAY_COLUMN}, ").unwrap();
             }
-            for (j, column) in table.0.iter().enumerate() {
-                // TODO: If The length of the vectors is different then there are top level values with tuples. Current code doesn't handle tuples.
-                if i == 0 && column_names.len() == table.0.len() {
-                    write!(&mut sql, "{}", &column_names[j]).unwrap();
-                } else {
-                    write!(&mut sql, "c{j}").unwrap();
-                };
-                let type_ = match column.0 {
+            for column in table.columns.iter() {
+                write!(&mut sql, "{}", column.name).unwrap();
+                let type_ = match abi_kind_to_sql_type(column.kind).unwrap() {
                     SqlType::Null => unreachable!(),
                     SqlType::Integer => "INTEGER",
                     SqlType::Real => "REAL",
@@ -315,14 +285,18 @@ impl SqliteInner {
                 };
                 write!(&mut sql, " {type_}, ").unwrap();
             }
-            let primary_key = if i == 0 {
-                PRIMARY_KEY
-            } else {
+            let primary_key = if is_array {
                 PRIMARY_KEY_ARRAY
+            } else {
+                PRIMARY_KEY
             };
             write!(&mut sql, "PRIMARY KEY({primary_key})) STRICT;").unwrap();
             tracing::debug!("creating table:\n{}", sql);
-            con.execute(&sql, ()).context("execute create_table")?;
+            con.execute(&sql, ()).context("execute create_table")
+        };
+        create_table(false, &tables.primary)?;
+        for table in &tables.dynamic_arrays {
+            create_table(true, table)?;
         }
 
         let mut new_event_block = con
@@ -332,14 +306,13 @@ impl SqliteInner {
             .execute((&name,))
             .context("execute new_event_block")?;
 
-        let insert_statements: Vec<InsertStatement> = tables
-            .iter()
-            .enumerate()
-            .map(|(i, table)| {
-                let is_array = i != 0;
+        let insert_statements: Vec<InsertStatement> = std::iter::once((false, &tables.primary))
+            .chain(std::iter::repeat(true).zip(&tables.dynamic_arrays))
+            .clone()
+            .map(|(is_array, table)| {
                 let mut sql = String::new();
-                write!(&mut sql, "INSERT INTO {name}_{i} VALUES(").unwrap();
-                for i in 0..table.0.len() + FIXED_COLUMNS_COUNT + is_array as usize {
+                write!(&mut sql, "INSERT INTO {} VALUES(", table.name).unwrap();
+                for i in 0..table.columns.len() + FIXED_COLUMNS_COUNT + is_array as usize {
                     write!(&mut sql, "?{},", i + 1).unwrap();
                 }
                 assert_eq!(sql.pop(), Some(','));
@@ -347,13 +320,14 @@ impl SqliteInner {
                 tracing::debug!("creating insert statement:\n{}", sql);
                 InsertStatement {
                     sql,
-                    fields: table.0.len(),
+                    fields: table.columns.len(),
                 }
             })
             .collect();
 
-        let remove_statements: Vec<String> = (0..tables.len())
-            .map(|i| format!("DELETE FROM {name}_{i} WHERE block_number >= ?1;"))
+        let remove_statements: Vec<String> = std::iter::once(&tables.primary)
+            .chain(&tables.dynamic_arrays)
+            .map(|table| format!("DELETE FROM {} WHERE block_number >= ?1;", table.name))
             .collect();
 
         // Check that prepared statements are valid. Unfortunately we can't distinguish the statement being wrong from other Sqlite errors like being unable to access the database file on disk.
@@ -367,7 +341,7 @@ impl SqliteInner {
         }
 
         self.events.insert(
-            name,
+            name.clone(),
             PreparedEvent {
                 descriptor: event.clone(),
                 insert_statements,
@@ -390,8 +364,7 @@ impl SqliteInner {
             fields,
         }: &'a Log,
     ) -> Result<()> {
-        let name = Self::sanitize_name(event);
-        let event = self.events.get(&name).context("unknown event")?;
+        let event = self.events.get(*event).context("unknown event")?;
 
         let len = fields.len();
         let expected_len = event.descriptor.inputs.len();
@@ -518,13 +491,12 @@ impl SqliteInner {
             .prepare_cached(SET_INDEXED_BLOCK)
             .context("prepare_cached set_indexed_block")?;
         for uncle in uncles {
-            let name = Self::sanitize_name(uncle.event);
             if uncle.number == 0 {
                 return Err(anyhow!("block 0 got uncled"));
             }
             let block = i64::try_from(uncle.number).context("block out of bounds")?;
             let parent_block = block - 1;
-            let prepared = self.events.get(&name).context("unprepared event")?;
+            let prepared = self.events.get(uncle.event).context("unprepared event")?;
             for remove_statement in &prepared.remove_statements {
                 let mut remove_statement = connection
                     .prepare_cached(remove_statement)
@@ -533,7 +505,7 @@ impl SqliteInner {
                     .execute((block,))
                     .context("execute remove_statement")?;
                 set_indexed_block
-                    .execute((&name, parent_block))
+                    .execute((uncle.event, parent_block))
                     .context("execute set_indexed_block")?;
             }
         }
@@ -541,85 +513,26 @@ impl SqliteInner {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct Table(Vec<Column>);
-
-#[derive(Debug, Eq, PartialEq)]
-struct Column(SqlType);
-
-fn event_to_tables(event: &EventDescriptor) -> Result<Vec<Table>> {
-    // TODO:
-    // - Handle indexed fields.
-    // - Make use of field names and potentially tuple names.
-
-    let values = event.inputs.iter().map(|input| &input.field.kind);
-
-    // Nested dynamic arrays are rare and hard to handle. The recursive visiting code and SQL schema becomes more complicated. Handle this properly later.
-    for value in values.clone() {
-        if has_nested_dynamic_arrays(value) {
-            return Err(anyhow!("nested dynamic arrays"));
-        }
+fn abi_kind_to_sql_type(value: &AbiKind) -> Option<SqlType> {
+    match value {
+        AbiKind::Int(_) => Some(SqlType::Blob),
+        AbiKind::Uint(_) => Some(SqlType::Blob),
+        AbiKind::Address => Some(SqlType::Blob),
+        AbiKind::Bool => Some(SqlType::Integer),
+        AbiKind::FixedBytes(_) => Some(SqlType::Blob),
+        AbiKind::Function => Some(SqlType::Blob),
+        AbiKind::Bytes => Some(SqlType::Blob),
+        AbiKind::String => Some(SqlType::Blob),
+        AbiKind::FixedArray(_, _) | AbiKind::Tuple(_) | AbiKind::Array(_) => None,
     }
-
-    let mut tables = vec![Table(vec![])];
-    for value in values {
-        map_value(&mut tables, value);
-    }
-
-    Ok(tables)
-}
-
-fn has_nested_dynamic_arrays(value: &AbiKind) -> bool {
-    let mut level: u32 = 0;
-    let mut max_level: u32 = 0;
-    let mut visitor = |visit: VisitKind| match visit {
-        VisitKind::ArrayStart => {
-            level += 1;
-            max_level = std::cmp::max(max_level, level);
-        }
-        VisitKind::ArrayEnd => level -= 1,
-        VisitKind::Value(_) => (),
-    };
-    event_visitor::visit_kind(value, &mut visitor);
-    max_level > 1
-}
-
-fn map_value(tables: &mut Vec<Table>, value: &AbiKind) {
-    assert!(!tables.is_empty());
-    let mut table_index = 0;
-    let mut visitor = move |value: VisitKind| {
-        let type_ = match value {
-            VisitKind::Value(&AbiKind::Int(_)) => SqlType::Blob,
-            VisitKind::Value(&AbiKind::Uint(_)) => SqlType::Blob,
-            VisitKind::Value(&AbiKind::Address) => SqlType::Blob,
-            VisitKind::Value(&AbiKind::Bool) => SqlType::Integer,
-            VisitKind::Value(&AbiKind::FixedBytes(_)) => SqlType::Blob,
-            VisitKind::Value(&AbiKind::Function) => SqlType::Blob,
-            VisitKind::Value(&AbiKind::Bytes) => SqlType::Blob,
-            VisitKind::Value(&AbiKind::String) => SqlType::Blob,
-            VisitKind::ArrayStart => {
-                table_index = tables.len();
-                tables.push(Table(vec![]));
-                return;
-            }
-            VisitKind::ArrayEnd => {
-                table_index = 0;
-                return;
-            }
-            _ => unreachable!(),
-        };
-        tables[table_index].0.push(Column(type_));
-    };
-    event_visitor::visit_kind(value, &mut visitor);
 }
 
 #[cfg(test)]
 mod tests {
     use solabi::{
-        abi::{EventField, Field},
         ethprim::Address,
         function::{ExternalFunction, Selector},
-        value::{Array, BitWidth, ByteLength, FixedBytes, Int, Uint},
+        value::{Array, FixedBytes, Int, Uint},
     };
 
     use super::*;
@@ -629,120 +542,40 @@ mod tests {
         Sqlite::new_for_test();
     }
 
-    fn event_descriptor(values: Vec<AbiKind>) -> EventDescriptor {
-        EventDescriptor {
-            name: Default::default(),
-            inputs: values
-                .into_iter()
-                .enumerate()
-                .map(|(i, value)| EventField {
-                    field: Field {
-                        name: format!("field {i}"),
-                        kind: value,
-                        components: Default::default(),
-                        internal_type: Default::default(),
-                    },
-                    indexed: Default::default(),
-                })
-                .collect(),
-            anonymous: Default::default(),
+    fn print_table(con: &Connection, table: &str) {
+        let mut statement = con.prepare(&format!("SELECT * FROM {table}")).unwrap();
+        let mut rows = statement.query(()).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            for i in 0..row.as_ref().column_count() {
+                let name = row.as_ref().column_name(i).unwrap();
+                let value = row.get_ref(i).unwrap();
+                println!("{name}: {value:?}");
+            }
+            println!();
         }
-    }
-
-    #[test]
-    fn map_value_simple() {
-        let values = vec![AbiKind::Bytes, AbiKind::Bool];
-        let schema = event_to_tables(&event_descriptor(values)).unwrap();
-        let expected = vec![Table(vec![Column(SqlType::Blob), Column(SqlType::Integer)])];
-        assert_eq!(schema, expected);
-    }
-
-    #[test]
-    fn map_value_complex_flat() {
-        let values = vec![
-            AbiKind::Bool,
-            AbiKind::Tuple(vec![AbiKind::Bytes, AbiKind::Bool]),
-            AbiKind::Bool,
-            AbiKind::FixedArray(2, Box::new(AbiKind::Bytes)),
-            AbiKind::Bool,
-            AbiKind::Tuple(vec![AbiKind::Tuple(vec![AbiKind::FixedArray(
-                2,
-                Box::new(AbiKind::Bytes),
-            )])]),
-            AbiKind::Bool,
-            AbiKind::FixedArray(
-                2,
-                Box::new(AbiKind::FixedArray(2, Box::new(AbiKind::Bytes))),
-            ),
-        ];
-        let schema = event_to_tables(&event_descriptor(values)).unwrap();
-        let expected = vec![Table(vec![
-            Column(SqlType::Integer),
-            // first tuple
-            Column(SqlType::Blob),
-            Column(SqlType::Integer),
-            //
-            Column(SqlType::Integer),
-            // first fixed array
-            Column(SqlType::Blob),
-            Column(SqlType::Blob),
-            //
-            Column(SqlType::Integer),
-            // second tuple
-            Column(SqlType::Blob),
-            Column(SqlType::Blob),
-            //
-            Column(SqlType::Integer),
-            // second fixed array
-            Column(SqlType::Blob),
-            Column(SqlType::Blob),
-            Column(SqlType::Blob),
-            Column(SqlType::Blob),
-        ])];
-        assert_eq!(schema, expected);
-    }
-
-    #[test]
-    fn map_value_array() {
-        let values = vec![
-            AbiKind::Bool,
-            AbiKind::Array(Box::new(AbiKind::Bytes)),
-            AbiKind::Bool,
-            AbiKind::Array(Box::new(AbiKind::Bool)),
-            AbiKind::Bool,
-        ];
-        let schema = event_to_tables(&event_descriptor(values)).unwrap();
-        let expected = vec![
-            Table(vec![
-                Column(SqlType::Integer),
-                Column(SqlType::Integer),
-                Column(SqlType::Integer),
-            ]),
-            Table(vec![Column(SqlType::Blob)]),
-            Table(vec![Column(SqlType::Integer)]),
-        ];
-        assert_eq!(schema, expected);
     }
 
     #[test]
     fn full_leaf_types() {
         let mut sqlite = Sqlite::new_for_test();
-        let values = vec![
-            AbiKind::Int(BitWidth::MIN),
-            AbiKind::Uint(BitWidth::MIN),
-            AbiKind::Address,
-            AbiKind::Bool,
-            AbiKind::FixedBytes(ByteLength::MIN),
-            AbiKind::Function,
-            AbiKind::Bytes,
-            AbiKind::String,
-        ];
-        let event = event_descriptor(values);
-        sqlite.prepare_event("event1", &event).unwrap();
+        let event = r#"
+event Event (
+    int256,
+    uint256,
+    address,
+    bool,
+    bytes1,
+    function,
+    bytes,
+    string
+)
+"#;
+        let event = EventDescriptor::parse_declaration(event).unwrap();
+        sqlite.prepare_event("event", &event).unwrap();
 
         let fields = vec![
-            AbiValue::Int(Int::new(8, 1i32.into()).unwrap()),
-            AbiValue::Uint(Uint::new(8, 2u32.into()).unwrap()),
+            AbiValue::Int(Int::new(256, 1i32.into()).unwrap()),
+            AbiValue::Uint(Uint::new(256, 2u32.into()).unwrap()),
             AbiValue::Address(Address([3; 20])),
             AbiValue::Bool(true),
             AbiValue::FixedBytes(FixedBytes::new(&[4]).unwrap()),
@@ -757,7 +590,7 @@ mod tests {
             .update(
                 &[],
                 &[Log {
-                    event: "event1",
+                    event: "event",
                     block_number: 1,
                     log_index: 2,
                     transaction_index: 3,
@@ -767,31 +600,22 @@ mod tests {
             )
             .unwrap();
 
-        let mut statement = sqlite.connection.prepare("SELECT * from event1_0").unwrap();
-        let mut rows = statement.query(()).unwrap();
-        while let Some(row) = rows.next().unwrap() {
-            assert_eq!(row.as_ref().column_count(), FIXED_COLUMNS_COUNT + 8);
-            for i in 0..row.as_ref().column_count() {
-                let name = row.as_ref().column_name(i).unwrap();
-                let value = row.get_ref(i).unwrap();
-                println!("{name}: {value:?}");
-            }
-            println!();
-        }
+        print_table(&sqlite.connection, "event");
     }
 
     #[test]
     fn with_array() {
         let mut sqlite = Sqlite::new_for_test();
-        let values = vec![AbiKind::Array(Box::new(AbiKind::Tuple(vec![
-            AbiKind::Bool,
-            AbiKind::String,
-        ])))];
-        let event = event_descriptor(values);
-        sqlite.prepare_event("event1", &event).unwrap();
+        let event = r#"
+event Event (
+    (bool, string)[]
+)
+"#;
+        let event = EventDescriptor::parse_declaration(event).unwrap();
+        sqlite.prepare_event("event", &event).unwrap();
 
         let log = Log {
-            event: "event1",
+            event: "event",
             block_number: 0,
             fields: vec![AbiValue::Array(
                 Array::from_values(vec![
@@ -811,7 +635,7 @@ mod tests {
         sqlite.update(&[], &[log]).unwrap();
 
         let log = Log {
-            event: "event1",
+            event: "event",
             block_number: 1,
             fields: vec![AbiValue::Array(
                 Array::new(AbiKind::Tuple(vec![AbiKind::Bool, AbiKind::String]), vec![]).unwrap(),
@@ -820,35 +644,15 @@ mod tests {
         };
         sqlite.update(&[], &[log]).unwrap();
 
-        let mut statement = sqlite.connection.prepare("SELECT * from event1_0").unwrap();
-        let mut rows = statement.query(()).unwrap();
-        while let Some(row) = rows.next().unwrap() {
-            assert_eq!(row.as_ref().column_count(), FIXED_COLUMNS_COUNT);
-            for i in 0..row.as_ref().column_count() {
-                let column = row.get_ref(i).unwrap();
-                println!("{:?}", column);
-            }
-            println!();
-        }
-
-        let mut statement = sqlite.connection.prepare("SELECT * from event1_1").unwrap();
-        let mut rows = statement.query(()).unwrap();
-        while let Some(row) = rows.next().unwrap() {
-            assert_eq!(row.as_ref().column_count(), FIXED_COLUMNS_COUNT + 3);
-            for i in 0..row.as_ref().column_count() {
-                let column = row.get_ref(i).unwrap();
-                println!("{:?}", column);
-            }
-            println!();
-        }
+        print_table(&sqlite.connection, "event");
+        print_table(&sqlite.connection, "event_array_0");
     }
 
     #[test]
     fn event_blocks() {
         let mut sqlite = Sqlite::new_for_test();
-        sqlite
-            .prepare_event("event", &event_descriptor(vec![]))
-            .unwrap();
+        let event = EventDescriptor::parse_declaration("event Event()").unwrap();
+        sqlite.prepare_event("event", &event).unwrap();
         let result = sqlite.event_block("event").unwrap();
         assert_eq!(result.indexed, 0);
         assert_eq!(result.finalized, 0);
@@ -868,12 +672,10 @@ mod tests {
     #[test]
     fn remove() {
         let mut sqlite = Sqlite::new_for_test();
-        sqlite
-            .prepare_event("event", &event_descriptor(vec![]))
-            .unwrap();
-        sqlite
-            .prepare_event("eventAAA", &event_descriptor(vec![]))
-            .unwrap();
+
+        let event = EventDescriptor::parse_declaration("event Event()").unwrap();
+        sqlite.prepare_event("event", &event).unwrap();
+        sqlite.prepare_event("eventAAA", &event).unwrap();
         sqlite
             .update(
                 &[],
@@ -905,7 +707,7 @@ mod tests {
         let rows = |sqlite: &Sqlite| {
             let count: i64 = sqlite
                 .connection
-                .query_row("SELECT COUNT(*) FROM event_0", (), |row| row.get(0))
+                .query_row("SELECT COUNT(*) FROM event", (), |row| row.get(0))
                 .unwrap();
             count
         };
@@ -934,37 +736,5 @@ mod tests {
             }])
             .unwrap();
         assert_eq!(rows(&sqlite), 0);
-    }
-
-    #[test]
-    fn named_tuple() {
-        let event = r#"
-event OrderPlacement(
-    address indexed sender,
-    (
-      address sellToken,
-      address buyToken,
-      address receiver,
-      uint256 sellAmount,
-      uint256 buyAmount,
-      uint32 validTo,
-      bytes32 appData,
-      uint256 feeAmount,
-      bytes32 kind,
-      bool partiallyFillable,
-      bytes32 sellTokenBalance,
-      bytes32 buyTokenBalance
-    ) order,
-    (
-      uint8 scheme,
-      bytes data
-    ) signature,
-    bytes data
-  )
-"#;
-        let event = EventDescriptor::parse_declaration(event).unwrap();
-        let mut s = Sqlite::new_for_test();
-        s.prepare_event("event", &event).unwrap();
-        // TODO: Check that the column names are right.
     }
 }

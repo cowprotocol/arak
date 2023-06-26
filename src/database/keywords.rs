@@ -1,5 +1,5 @@
 /// Table and column names can't be these words in any capitalization.
-pub const SQLITE_KEYWORDS: &[&str] = &[
+pub const KEYWORDS: &[&str] = &[
     "abort",
     "action",
     "add",

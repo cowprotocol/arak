@@ -1,15 +1,16 @@
-// TODO:
-// - Implement this for Postgres in addition to Sqlite. Postgres will likely have a native async backend, so we should have the trait be async and internally `spawn_blocking` for use of non async rusqlite.
-// - Think about whether the trait should be Send + Sync and whether methods should take mutable Self.
-
 mod event_to_tables;
 mod event_visitor;
 mod keywords;
+mod postgres;
 mod sqlite;
 
-pub use self::sqlite::Sqlite;
-use anyhow::Result;
-use solabi::{abi::EventDescriptor, ethprim::Address, value::Value};
+use {
+    anyhow::Result,
+    futures::future::BoxFuture,
+    solabi::{abi::EventDescriptor, ethprim::Address, value::Value},
+};
+
+pub use self::{postgres::Postgres, sqlite::Sqlite};
 
 /// Block indexing information.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -45,25 +46,35 @@ pub struct Log<'a> {
 
 /// Abstraction over specific SQL like backends.
 ///
-/// Note that the methods are blocking. If you call them from async code, make sure you handle this correctly. With Tokio you could use `spawn_blocking`.
-///
-/// All methods either succeed in full or error without having applied any changes. This is accomplished by using SQL transactions.
+/// All methods either succeed in full or error without having applied any
+/// changes. This is accomplished by using SQL transactions.
 pub trait Database {
     /// Prepare the database to store this event in the future.
     ///
-    /// The database maps the event to tables and columns with native SQL types. For all event tables the primary key is `(block_number, log_index)` plus an array index for values in dynamic arrays.
+    /// The database maps the event to tables and columns with native SQL types.
+    /// For all event tables the primary key is `(block_number, log_index)` plus
+    /// an array index for values in dynamic arrays.
     ///
-    /// `name` identifies this event. Database tables for this event are prefixed with the name.
+    /// `name` identifies this event. Database tables for this event are
+    /// prefixed with the name.
     ///
-    /// If this is the first time the event has been prepared on this database (the persistent database file, not this instance of the Database trait), then the event's indexed and finalized blocks' (see `event_block`) are set to 0.
+    /// If this is the first time the event has been prepared on this database
+    /// (the persistent database file, not this instance of the Database trait),
+    /// then the event's indexed and finalized blocks (see `event_block`) are
+    /// set to 0.
     ///
     /// Errors:
     ///
-    /// - A table for `name` already exists with an incompatible event signature.
-    fn prepare_event(&mut self, name: &str, event: &EventDescriptor) -> Result<()>;
+    /// - A table for `name` already exists with an incompatible event
+    ///   signature.
+    fn prepare_event<'a>(
+        &'a mut self,
+        name: &'a str,
+        event: &'a EventDescriptor,
+    ) -> BoxFuture<'a, Result<()>>;
 
     /// Retrieves the block information for the specified event.
-    fn event_block(&mut self, name: &str) -> Result<Block>;
+    fn event_block<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, Result<Block>>;
 
     /// It updates two things:
     /// - `blocks` specifies updates to the block information for events; this
@@ -76,12 +87,16 @@ pub trait Database {
     ///   from one or more of the specified `blocks` or `logs`.
     /// - `fields` do not match the event signature specified in the successful
     ///   call to `prepare_event` with this `event` name for one or more `logs`.
-    fn update(&mut self, blocks: &[EventBlock], logs: &[Log]) -> Result<()>;
+    fn update<'a>(
+        &'a mut self,
+        blocks: &'a [EventBlock],
+        logs: &'a [Log],
+    ) -> BoxFuture<'a, Result<()>>;
 
     /// Removes logs from the specified event's uncled blocks.
     ///
     /// Additionally the last indexed block is set to the uncled block's parent;
     /// this changes the `indexed` field of the result from `event_block` for
     /// the specified events.
-    fn remove(&mut self, uncles: &[Uncle]) -> Result<()>;
+    fn remove<'a>(&'a mut self, uncles: &'a [Uncle]) -> BoxFuture<'a, Result<()>>;
 }

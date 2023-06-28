@@ -3,18 +3,20 @@
 mod adapter;
 mod chain;
 
-use self::{adapter::Adapter, chain::Chain};
-use crate::{
-    config,
-    database::{self, Database},
+use {
+    self::{adapter::Adapter, chain::Chain},
+    crate::{
+        config,
+        database::{self, Database},
+    },
+    anyhow::{Context, Result},
+    ethrpc::{
+        eth,
+        types::{Block, BlockTag, Hydrated, LogBlocks},
+    },
+    std::{cmp, time::Duration},
+    tokio::time,
 };
-use anyhow::{Context, Result};
-use ethrpc::{
-    eth,
-    types::{Block, BlockTag, Hydrated, LogBlocks},
-};
-use std::{cmp, time::Duration};
-use tokio::time;
 
 /// An Ethereum event indexer.
 pub struct Indexer<D> {
@@ -72,26 +74,20 @@ where
     async fn init(&mut self, config: Run) -> Result<Block> {
         for adapter in &self.adapters {
             self.database
-                .prepare_event(adapter.name(), adapter.signature())?;
+                .prepare_event(adapter.name(), adapter.signature())
+                .await?;
         }
 
-        let unfinalized = self
-            .adapters
-            .iter()
-            .filter_map(|adapter| {
-                let block = match self.database.event_block(adapter.name()) {
-                    Ok(value) => value,
-                    Err(err) => return Some(Err(err)),
-                };
-
-                (block.indexed > block.finalized).then(|| {
-                    Ok(database::Uncle {
-                        event: adapter.name(),
-                        number: block.finalized + 1,
-                    })
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut unfinalized = Vec::new();
+        for adapter in self.adapters.iter() {
+            let block = self.database.event_block(adapter.name()).await?;
+            if block.indexed > block.finalized {
+                unfinalized.push(database::Uncle {
+                    event: adapter.name(),
+                    number: block.finalized + 1,
+                });
+            }
+        }
         for unfinalized in &unfinalized {
             tracing::info!(
                 event = %unfinalized.event, finalized = %unfinalized.number,
@@ -99,7 +95,7 @@ where
             );
         }
         if !unfinalized.is_empty() {
-            self.database.remove(&unfinalized)?;
+            self.database.remove(&unfinalized).await?;
         }
 
         loop {
@@ -114,7 +110,7 @@ where
 
             // Compute the next block to initialize from per adapter and the
             // earliest initialization block.
-            let init = self.init_blocks()?;
+            let init = self.init_blocks().await?;
             let earliest = init
                 .iter()
                 .copied()
@@ -169,7 +165,7 @@ where
                 .flat_map(|(adapter, logs)| database_logs(adapter, logs))
                 .collect::<Vec<_>>();
 
-            self.database.update(&blocks, &logs)?;
+            self.database.update(&blocks, &logs).await?;
         }
     }
 
@@ -207,7 +203,7 @@ where
                         number: block.as_u64(),
                     })
                     .collect::<Vec<_>>();
-                self.database.remove(&uncles)?;
+                self.database.remove(&uncles).await?;
                 return Ok(true);
             }
         }
@@ -262,21 +258,20 @@ where
             .flat_map(|(adapter, logs)| database_logs(adapter, logs))
             .collect::<Vec<_>>();
 
-        self.database.update(&blocks, &logs)?;
+        self.database.update(&blocks, &logs).await?;
         Ok(true)
     }
 
-    /// Computes the blocks to start initialising from for each adapter.
-    fn init_blocks(&mut self) -> Result<Vec<u64>> {
-        self.adapters
-            .iter()
-            .map(|adapter| {
-                Ok(cmp::max(
-                    adapter.start(),
-                    self.database.event_block(adapter.name())?.indexed + 1,
-                ))
-            })
-            .collect()
+    /// Computes the blocks to start initializing from for each adapter.
+    async fn init_blocks(&mut self) -> Result<Vec<u64>> {
+        let mut blocks = Vec::new();
+        for adapter in self.adapters.iter() {
+            blocks.push(cmp::max(
+                adapter.start(),
+                self.database.event_block(adapter.name()).await?.indexed + 1,
+            ));
+        }
+        Ok(blocks)
     }
 }
 

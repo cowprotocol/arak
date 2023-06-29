@@ -7,6 +7,7 @@ use {
     },
     anyhow::{anyhow, Context, Result},
     futures::{future::BoxFuture, FutureExt},
+    rust_decimal::Decimal,
     solabi::{
         abi::EventDescriptor,
         value::{Value as AbiValue, ValueKind as AbiKind},
@@ -310,8 +311,12 @@ impl Postgres {
                     in_array = false;
                     return;
                 }
-                VisitValue::Value(AbiValue::Int(v)) => Box::new(v.get().to_be_bytes().to_vec()),
-                VisitValue::Value(AbiValue::Uint(v)) => Box::new(v.get().to_be_bytes().to_vec()),
+                VisitValue::Value(AbiValue::Int(v)) => {
+                    Box::new(Decimal::from_str_exact(&v.get().to_string()).unwrap())
+                }
+                VisitValue::Value(AbiValue::Uint(v)) => {
+                    Box::new(Decimal::from_str_exact(&v.get().to_string()).unwrap())
+                }
                 VisitValue::Value(AbiValue::Address(v)) => {
                     Box::new(v.0.into_iter().collect::<Vec<_>>())
                 }
@@ -402,6 +407,7 @@ impl Postgres {
             let type_ = match abi_kind_to_sql_type(column.kind).unwrap() {
                 tokio_postgres::types::Type::INT8 => "INT8",
                 tokio_postgres::types::Type::BYTEA => "BYTEA",
+                tokio_postgres::types::Type::NUMERIC => "NUMERIC",
                 _ => unreachable!(),
             };
             write!(&mut sql, " {type_}, ").unwrap();
@@ -462,14 +468,14 @@ impl std::fmt::Debug for InsertStatement {
 
 fn abi_kind_to_sql_type(value: &AbiKind) -> Option<tokio_postgres::types::Type> {
     match value {
-        AbiKind::Int(_) => Some(tokio_postgres::types::Type::BYTEA),
-        AbiKind::Uint(_) => Some(tokio_postgres::types::Type::BYTEA),
+        AbiKind::Int(_) => Some(tokio_postgres::types::Type::NUMERIC),
+        AbiKind::Uint(_) => Some(tokio_postgres::types::Type::NUMERIC),
         AbiKind::Address => Some(tokio_postgres::types::Type::BYTEA),
-        AbiKind::Bool => Some(tokio_postgres::types::Type::INT8),
+        AbiKind::Bool => Some(tokio_postgres::types::Type::BOOL),
         AbiKind::FixedBytes(_) => Some(tokio_postgres::types::Type::BYTEA),
         AbiKind::Function => Some(tokio_postgres::types::Type::BYTEA),
         AbiKind::Bytes => Some(tokio_postgres::types::Type::BYTEA),
-        AbiKind::String => Some(tokio_postgres::types::Type::BYTEA),
+        AbiKind::String => Some(tokio_postgres::types::Type::TEXT),
         AbiKind::FixedArray(_, _) | AbiKind::Tuple(_) | AbiKind::Array(_) => None,
     }
 }

@@ -21,6 +21,11 @@ pub struct Postgres {
     /// The key is the `name` argument when the event was passed into
     /// `prepare_event`.
     events: HashMap<String, PreparedEvent>,
+
+    get_event_block: tokio_postgres::Statement,
+    set_event_block: tokio_postgres::Statement,
+    set_indexed_block: tokio_postgres::Statement,
+    new_event_block: tokio_postgres::Statement,
 }
 
 /// An event is represented in the database in several tables.
@@ -37,7 +42,7 @@ struct PreparedEvent {
     insert_statements: Vec<InsertStatement>,
     /// Prepared statements for removing rows starting at some block number.
     /// Every statement takes a block number as parameter.
-    remove_statements: Vec<String>,
+    remove_statements: Vec<tokio_postgres::Statement>,
 }
 
 impl Postgres {
@@ -60,22 +65,30 @@ impl Postgres {
             .await
             .context("create event_block table")?;
 
-        client
+        let get_event_block = client
             .prepare(GET_EVENT_BLOCK)
             .await
             .context("prepare GET_EVENT_BLOCK")?;
-        client
+        let set_event_block = client
             .prepare(SET_EVENT_BLOCK)
             .await
             .context("prepare SET_EVENT_BLOCK")?;
-        client
+        let set_indexed_block = client
             .prepare(SET_INDEXED_BLOCK)
             .await
             .context("prepare SET_INDEXED_BLOCK")?;
+        let new_event_block = client
+            .prepare(NEW_EVENT_BLOCK)
+            .await
+            .context("prepare new_event_block")?;
 
         Ok(Self {
             client,
             events: Default::default(),
+            get_event_block,
+            set_event_block,
+            set_indexed_block,
+            new_event_block,
         })
     }
 }
@@ -114,53 +127,41 @@ impl Database for Postgres {
                 Self::create_table(&transaction, true, table).await?;
             }
 
-            let new_event_block = transaction
-                .prepare(NEW_EVENT_BLOCK)
-                .await
-                .context("prepare new_event_block")?;
             transaction
-                .execute(&new_event_block, &[name])
+                .execute(&self.new_event_block, &[name])
                 .await
                 .context("execute new_event_block")?;
 
-            let insert_statements: Vec<InsertStatement> = std::iter::once((false, &tables.primary))
+            let mut insert_statements = Vec::new();
+            for (is_array, table) in std::iter::once((false, &tables.primary))
                 .chain(std::iter::repeat(true).zip(&tables.dynamic_arrays))
-                .clone()
-                .map(|(is_array, table)| {
-                    let mut sql = String::new();
-                    write!(&mut sql, "INSERT INTO {} VALUES(", table.name).unwrap();
-                    for i in 0..table.columns.len() + FIXED_COLUMNS_COUNT + is_array as usize {
-                        write!(&mut sql, "${},", i + 1).unwrap();
-                    }
-                    assert_eq!(sql.pop(), Some(','));
-                    write!(&mut sql, ");").unwrap();
-                    tracing::debug!("creating insert statement:\n{}", sql);
-                    InsertStatement {
-                        sql,
-                        fields: table.columns.len(),
-                    }
-                })
-                .collect();
-
-            let remove_statements: Vec<String> = std::iter::once(&tables.primary)
-                .chain(&tables.dynamic_arrays)
-                .map(|table| format!("DELETE FROM {} WHERE block_number >= $1;", table.name))
-                .collect();
-
-            // Check that prepared statements are valid. Unfortunately we can't distinguish
-            // the statement being wrong from other Postgres errors like being unable to
-            // access the database file on disk.
-            for statement in &insert_statements {
-                transaction
-                    .prepare(&statement.sql)
-                    .await
-                    .context("invalid prepared insert statement")?;
+            {
+                let mut sql = String::new();
+                write!(&mut sql, "INSERT INTO {} VALUES(", table.name).unwrap();
+                for i in 0..table.columns.len() + FIXED_COLUMNS_COUNT + is_array as usize {
+                    write!(&mut sql, "${},", i + 1).unwrap();
+                }
+                assert_eq!(sql.pop(), Some(','));
+                write!(&mut sql, ");").unwrap();
+                tracing::debug!("creating insert statement:\n{}", sql);
+                insert_statements.push(InsertStatement {
+                    sql: transaction
+                        .prepare(&sql)
+                        .await
+                        .context(format!("prepare {}", sql))?,
+                    fields: table.columns.len(),
+                });
             }
-            for statement in &remove_statements {
-                transaction
-                    .prepare(statement)
-                    .await
-                    .context("invalid prepared remove statement")?;
+
+            let mut remove_statements = Vec::new();
+            for table in std::iter::once(&tables.primary).chain(&tables.dynamic_arrays) {
+                let sql = format!("DELETE FROM {} WHERE block_number >= $1;", table.name);
+                remove_statements.push(
+                    transaction
+                        .prepare(&sql)
+                        .await
+                        .context(format!("prepare {}", sql))?,
+                );
             }
 
             self.events.insert(
@@ -179,14 +180,9 @@ impl Database for Postgres {
 
     fn event_block<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, Result<database::Block>> {
         async move {
-            let statement = self
-                .client
-                .prepare(GET_EVENT_BLOCK)
-                .await
-                .context("prepare GET_EVENT_BLOCK")?;
             let row = self
                 .client
-                .query_one(&statement, &[&name])
+                .query_one(&self.get_event_block, &[&name])
                 .await
                 .context("query GET_EVENT_BLOCK")?;
             let block: (i64, i64) = (row.try_get(0)?, row.try_get(1)?);
@@ -206,10 +202,6 @@ impl Database for Postgres {
         async move {
             let mut transaction = self.client.transaction().await.context("transaction")?;
 
-            let statement = transaction
-                .prepare(SET_EVENT_BLOCK)
-                .await
-                .context("prepare SET_EVENT_BLOCK")?;
             for block in blocks {
                 if !self.events.contains_key(block.event) {
                     return Err(anyhow!("event {} wasn't prepared", block.event));
@@ -225,7 +217,7 @@ impl Database for Postgres {
                     .try_into()
                     .context("finalized out of bounds")?;
                 let rows = transaction
-                    .execute(&statement, &[&block.event, &indexed, &finalized])
+                    .execute(&self.set_event_block, &[&block.event, &indexed, &finalized])
                     .await
                     .context("execute SET_EVENT_BLOCK")?;
                 if rows != 1 {
@@ -250,10 +242,6 @@ impl Database for Postgres {
         async move {
             let transaction = self.client.transaction().await.context("transaction")?;
 
-            let set_indexed_block = transaction
-                .prepare(SET_INDEXED_BLOCK)
-                .await
-                .context("prepare SET_INDEXED_BLOCK")?;
             for uncle in uncles {
                 if uncle.number == 0 {
                     return Err(anyhow!("block 0 got uncled"));
@@ -262,16 +250,12 @@ impl Database for Postgres {
                 let parent_block = block - 1;
                 let prepared = self.events.get(uncle.event).context("unprepared event")?;
                 for remove_statement in &prepared.remove_statements {
-                    let remove_statement = transaction
-                        .prepare(remove_statement)
-                        .await
-                        .context("prepare remove_statement")?;
                     transaction
-                        .execute(&remove_statement, &[&block])
+                        .execute(remove_statement, &[&block])
                         .await
                         .context("execute remove_statement")?;
                     transaction
-                        .execute(&set_indexed_block, &[&uncle.event, &parent_block])
+                        .execute(&self.set_indexed_block, &[&uncle.event, &parent_block])
                         .await
                         .context("execute set_indexed_block")?;
                 }
@@ -365,10 +349,6 @@ impl Postgres {
         for (statement, (array_element_count, values)) in
             event.insert_statements.iter().zip(sql_values)
         {
-            let statement_ = transaction
-                .prepare(&statement.sql)
-                .await
-                .context(format!("prepare {}", statement.sql))?;
             let is_array = array_element_count.is_some();
             let array_element_count = array_element_count.unwrap_or(1);
             assert_eq!(statement.fields * array_element_count, values.len());
@@ -397,9 +377,9 @@ impl Postgres {
                 )
                 .collect();
                 transaction
-                    .execute(&statement_, params.as_slice())
+                    .execute(&statement.sql, params.as_slice())
                     .await
-                    .context(format!("execute {}", statement.sql))?;
+                    .context("execute insert")?;
             }
         }
 
@@ -465,12 +445,19 @@ const SET_INDEXED_BLOCK: &str = "UPDATE _event_block SET indexed = $2 WHERE even
 /// - 2: log index
 /// - 3: array index if this is an array table (all tables after the first)
 /// - 3 + n: n-th event field/column
-#[derive(Debug)]
 struct InsertStatement {
-    sql: String,
+    sql: tokio_postgres::Statement,
     /// Number of event fields that map to SQL columns. Does not count
     /// FIXED_COLUMNS and array index.
     fields: usize,
+}
+
+impl std::fmt::Debug for InsertStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InsertStatement")
+            .field("fields", &self.fields)
+            .finish()
+    }
 }
 
 fn abi_kind_to_sql_type(value: &AbiKind) -> Option<tokio_postgres::types::Type> {

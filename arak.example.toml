@@ -3,7 +3,7 @@
 ethrpc = "https://mainnet.infura.io/v3/<INFURA_PROJECT_ID>"
 
 [database.sqlite]
-url = "sqlite:///arak.db"
+connection = "file:arak.db"
 
 [[event]]
 name = "cowprotocol_settlements"

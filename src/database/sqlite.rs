@@ -9,14 +9,13 @@ use {
     futures::{future::BoxFuture, FutureExt},
     rusqlite::{
         types::{ToSqlOutput, Type as SqlType, Value as SqlValue, ValueRef as SqlValueRef},
-        Connection, OpenFlags, Transaction,
+        Connection, Transaction,
     },
     solabi::{
         abi::EventDescriptor,
         value::{Value as AbiValue, ValueKind as AbiKind},
     },
-    std::{collections::HashMap, env, fmt::Write},
-    url::Url,
+    std::{collections::HashMap, fmt::Write},
 };
 
 pub struct Sqlite {
@@ -30,52 +29,11 @@ impl Sqlite {
         Ok(Self { connection, inner })
     }
 
-    /// Opens a new SQLite database backend for the specified URL. The expected
-    /// URL format is `sqlite://[/path[?query]]`. For example:
-    ///
-    /// - `sqlite://` to open and in-memory connection
-    /// - `sqlite:///relative/foo.db` to open the file `relative/foo.db`
-    /// - `sqlite:////absolute/foo.db` to open the file `/absolute/foo.db`
-    ///
-    /// Addionally, query string parameters can be set to configure database
-    /// connection options. See <https://www.sqlite.org/uri.html> for supported
-    /// query string paramters.
-    pub fn open(url: &Url) -> Result<Self> {
-        anyhow::ensure!(url.scheme() == "sqlite", "not an sqlite:// URL");
-        anyhow::ensure!(
-            url.has_authority() && url.authority() == "",
-            "sqlite:// URL requires empty authority"
-        );
-        anyhow::ensure!(
-            url.fragment().is_none(),
-            "sqlite:// URL does not support fragments"
-        );
-
-        if url.path().is_empty() {
-            tracing::debug!("opening in-memory database");
-            return Self::new(Connection::open_in_memory()?);
-        };
-
-        // SQLite 3 supports connection strings as file:// URLs, convert our
-        // `sqlite://` to that.
-        let path = env::current_dir()?.join(
-            url.path()
-                .strip_prefix('/')
-                .expect("can-be-a-base URL not prefixed with /"),
-        );
-        let mut file = Url::from_file_path(path)
-            .ok()
-            .context("invalid sqlite:// URL file path")?;
-        if let Some(query) = url.query() {
-            file.set_query(Some(query));
-        }
-
-        tracing::debug!("opening database {file}");
-        let connection = Connection::open_with_flags(
-            file.as_str(),
-            OpenFlags::default() | OpenFlags::SQLITE_OPEN_URI,
-        )?;
-
+    /// Opens a new SQLite database backend for the specified connection string.
+    /// The connection string can either be a file path or a `file://` URL (see
+    /// <https://www.sqlite.org/uri.html> for more information).
+    pub fn open(connection: &str) -> Result<Self> {
+        let connection = Connection::open(connection)?;
         Self::new(connection)
     }
 

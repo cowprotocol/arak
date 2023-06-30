@@ -29,8 +29,8 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Database {
-    Sqlite { url: Url },
-    Postgres { params: String },
+    Sqlite { connection: String },
+    Postgres { connection: String },
 }
 
 #[derive(Debug, Deserialize)]

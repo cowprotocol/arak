@@ -1,27 +1,36 @@
-use anyhow::Result;
-use ethrpc::types::{ArrayVec, LogFilterValue};
-use serde::Deserialize;
-use solabi::{
-    abi::EventDescriptor,
-    ethprim::{Address, Digest},
+use {
+    anyhow::Result,
+    ethrpc::types::{ArrayVec, LogFilterValue},
+    serde::Deserialize,
+    solabi::{
+        abi::EventDescriptor,
+        ethprim::{Address, Digest},
+    },
+    std::{
+        fmt::{self, Debug, Formatter},
+        fs,
+        path::{Path, PathBuf},
+        time::Duration,
+    },
+    url::Url,
 };
-use std::{
-    fmt::{self, Debug, Formatter},
-    fs,
-    path::{Path, PathBuf},
-    time::Duration,
-};
-use url::Url;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
     pub ethrpc: Url,
-    pub database: Url,
+    pub database: Database,
     #[serde(default = "indexer::default")]
     pub indexer: Indexer,
     #[serde(rename = "event")]
     pub events: Vec<Event>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Database {
+    Sqlite { url: Url },
+    Postgres { params: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,7 +42,7 @@ pub struct Indexer {
     pub poll_interval: Duration,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Event {
     pub name: String,
     #[serde(default)]
@@ -45,7 +54,7 @@ pub struct Event {
     pub signature: EventDescriptor,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum Contract {
     #[serde(with = "contract")]
@@ -71,7 +80,7 @@ impl Debug for Config {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct("Config")
             .field("ethrpc", &self.ethrpc.as_str())
-            .field("database", &self.database.as_str())
+            .field("database", &self.database)
             .field("indexer", &self.indexer)
             .field("event", &self.events)
             .finish()
@@ -79,9 +88,11 @@ impl Debug for Config {
 }
 
 mod signature {
-    use serde::{de, Deserialize, Deserializer};
-    use solabi::abi::EventDescriptor;
-    use std::borrow::Cow;
+    use {
+        serde::{de, Deserialize, Deserializer},
+        solabi::abi::EventDescriptor,
+        std::borrow::Cow,
+    };
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<EventDescriptor, D::Error>
     where
@@ -93,8 +104,10 @@ mod signature {
 }
 
 mod contract {
-    use serde::{de, Deserialize, Deserializer};
-    use std::borrow::Cow;
+    use {
+        serde::{de, Deserialize, Deserializer},
+        std::borrow::Cow,
+    };
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<(), D::Error>
     where
@@ -108,8 +121,7 @@ mod contract {
 }
 
 mod indexer {
-    use super::Indexer;
-    use std::time::Duration;
+    use {super::Indexer, std::time::Duration};
 
     pub fn default() -> Indexer {
         Indexer {
@@ -128,8 +140,10 @@ mod indexer {
 }
 
 mod duration {
-    use serde::{Deserialize, Deserializer};
-    use std::time::Duration;
+    use {
+        serde::{Deserialize, Deserializer},
+        std::time::Duration,
+    };
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
     where

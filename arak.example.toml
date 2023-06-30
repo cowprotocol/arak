@@ -1,7 +1,9 @@
 # Sample configuration file for Arak indexing service
 
 ethrpc = "https://mainnet.infura.io/v3/<INFURA_PROJECT_ID>"
-database = "sqlite:///<DB_PATH>"
+
+[database.sqlite]
+url = "sqlite:///arak.db"
 
 [[event]]
 name = "cowprotocol_settlements"

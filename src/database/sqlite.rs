@@ -1,20 +1,23 @@
-use crate::database::{
-    self,
-    event_to_tables::Table,
-    event_visitor::{self, VisitValue},
-    Database, Log,
+use {
+    crate::database::{
+        self,
+        event_to_tables::Table,
+        event_visitor::{self, VisitValue},
+        Database, Log,
+    },
+    anyhow::{anyhow, Context, Result},
+    futures::{future::BoxFuture, FutureExt},
+    rusqlite::{
+        types::{ToSqlOutput, Type as SqlType, Value as SqlValue, ValueRef as SqlValueRef},
+        Connection, OpenFlags, Transaction,
+    },
+    solabi::{
+        abi::EventDescriptor,
+        value::{Value as AbiValue, ValueKind as AbiKind},
+    },
+    std::{collections::HashMap, env, fmt::Write},
+    url::Url,
 };
-use anyhow::{anyhow, Context, Result};
-use rusqlite::{
-    types::{ToSqlOutput, Type as SqlType, Value as SqlValue, ValueRef as SqlValueRef},
-    Connection, OpenFlags, Transaction,
-};
-use solabi::{
-    abi::EventDescriptor,
-    value::{Value as AbiValue, ValueKind as AbiKind},
-};
-use std::{collections::HashMap, env, fmt::Write};
-use url::Url;
 
 pub struct Sqlite {
     connection: Connection,
@@ -84,31 +87,49 @@ impl Sqlite {
 }
 
 impl Database for Sqlite {
-    fn prepare_event(&mut self, name: &str, event: &EventDescriptor) -> Result<()> {
-        let transaction = self.connection.transaction().context("transaction")?;
-        self.inner.prepare_event(&transaction, name, event)?;
-        transaction.commit().context("commit")
+    fn prepare_event<'a>(
+        &'a mut self,
+        name: &'a str,
+        event: &'a EventDescriptor,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let transaction = self.connection.transaction().context("transaction")?;
+            self.inner.prepare_event(&transaction, name, event)?;
+            transaction.commit().context("commit")
+        }
+        .boxed()
     }
 
-    fn event_block(&mut self, name: &str) -> Result<database::Block> {
-        self.inner.event_block(&self.connection, name)
+    fn event_block<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, Result<database::Block>> {
+        async move { self.inner.event_block(&self.connection, name) }.boxed()
     }
 
-    fn update(&mut self, blocks: &[database::EventBlock], logs: &[database::Log]) -> Result<()> {
-        let transaction = self.connection.transaction().context("transaction")?;
-        self.inner.update(&transaction, blocks, logs)?;
-        transaction.commit().context("commit")
+    fn update<'a>(
+        &'a mut self,
+        blocks: &'a [database::EventBlock],
+        logs: &'a [database::Log],
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let transaction = self.connection.transaction().context("transaction")?;
+            self.inner.update(&transaction, blocks, logs)?;
+            transaction.commit().context("commit")
+        }
+        .boxed()
     }
 
-    fn remove(&mut self, uncles: &[database::Uncle]) -> Result<()> {
-        let transaction = self.connection.transaction().context("transaction")?;
-        self.inner.remove(&transaction, uncles)?;
-        transaction.commit().context("commit")
+    fn remove<'a>(&'a mut self, uncles: &'a [database::Uncle]) -> BoxFuture<'a, Result<()>> {
+        async move {
+            let transaction = self.connection.transaction().context("transaction")?;
+            self.inner.remove(&transaction, uncles)?;
+            transaction.commit().context("commit")
+        }
+        .boxed()
     }
 }
 
 /// Columns that every event table has.
-const FIXED_COLUMNS: &str = "block_number INTEGER NOT NULL, log_index INTEGER NOT NULL, transaction_index INTEGER NOT NULL, address BLOB NOT NULL";
+const FIXED_COLUMNS: &str = "block_number INTEGER NOT NULL, log_index INTEGER NOT NULL, \
+                             transaction_index INTEGER NOT NULL, address BLOB NOT NULL";
 const FIXED_COLUMNS_COUNT: usize = 4;
 const PRIMARY_KEY: &str = "block_number ASC, log_index ASC";
 
@@ -116,10 +137,12 @@ const PRIMARY_KEY: &str = "block_number ASC, log_index ASC";
 const ARRAY_COLUMN: &str = "array_index INTEGER NOT NULL";
 const PRIMARY_KEY_ARRAY: &str = "block_number ASC, log_index ASC, array_index ASC";
 
-const CREATE_EVENT_BLOCK_TABLE: &str = "CREATE TABLE IF NOT EXISTS _event_block(event TEXT PRIMARY KEY NOT NULL, indexed INTEGER NOT NULL, finalized INTEGER NOT NULL) STRICT;";
+const CREATE_EVENT_BLOCK_TABLE: &str = "CREATE TABLE IF NOT EXISTS _event_block(event TEXT \
+                                        PRIMARY KEY NOT NULL, indexed INTEGER NOT NULL, finalized \
+                                        INTEGER NOT NULL) STRICT;";
 const GET_EVENT_BLOCK: &str = "SELECT indexed, finalized FROM _event_block WHERE event = ?1;";
-const NEW_EVENT_BLOCK: &str =
-    "INSERT INTO _event_block (event, indexed, finalized) VALUES(?1, 0, 0) ON CONFLICT(event) DO NOTHING;";
+const NEW_EVENT_BLOCK: &str = "INSERT INTO _event_block (event, indexed, finalized) VALUES(?1, 0, \
+                               0) ON CONFLICT(event) DO NOTHING;";
 const SET_EVENT_BLOCK: &str =
     "UPDATE _event_block SET indexed = ?2, finalized = ?3 WHERE event = ?1;";
 const SET_INDEXED_BLOCK: &str = "UPDATE _event_block SET indexed = ?2 WHERE event = ?1";
@@ -127,17 +150,23 @@ const SET_INDEXED_BLOCK: &str = "UPDATE _event_block SET indexed = ?2 WHERE even
 const TABLE_EXISTS: &str =
     "SELECT COUNT(*) > 0 FROM sqlite_schema WHERE type = 'table' AND name = ?1";
 
-// Separate type because of lifetime issues when creating transactions. Outer struct only stores the connection itself.
+// Separate type because of lifetime issues when creating transactions. Outer
+// struct only stores the connection itself.
 struct SqliteInner {
     /// Invariant: Events in the map have corresponding tables in the database.
     ///
-    /// The key is the `name` argument when the event was passed into `prepare_event`.
+    /// The key is the `name` argument when the event was passed into
+    /// `prepare_event`.
     events: HashMap<String, PreparedEvent>,
 }
 
 /// An event is represented in the database in several tables.
 ///
-/// All tables have some columns that are unrelated to the event's fields. See `FIXED_COLUMNS`. The first table contains all fields that exist once per event which means they do not show up in arrays. The other tables contain fields that are part of arrays. Those tables additionally have the column `ARRAY_COLUMN`.
+/// All tables have some columns that are unrelated to the event's fields. See
+/// `FIXED_COLUMNS`. The first table contains all fields that exist once per
+/// event which means they do not show up in arrays. The other tables contain
+/// fields that are part of arrays. Those tables additionally have the column
+/// `ARRAY_COLUMN`.
 ///
 /// The order of tables and fields is given by the `event_visitor` module.
 struct PreparedEvent {
@@ -156,7 +185,8 @@ struct PreparedEvent {
 #[derive(Debug)]
 struct InsertStatement {
     sql: String,
-    /// Number of event fields that map to SQL columns. Does not count FIXED_COLUMNS and array index.
+    /// Number of event fields that map to SQL columns. Does not count
+    /// FIXED_COLUMNS and array index.
     fields: usize,
 }
 
@@ -249,9 +279,12 @@ impl SqliteInner {
         event: &EventDescriptor,
     ) -> Result<()> {
         // TODO:
-        // - Check that either no table exists or all tables exist and with the right types.
-        // - Maybe have `CHECK` clauses to enforce things like address and integers having expected length.
-        // - Maybe store serialized event descriptor in the database so we can load and check it.
+        // - Check that either no table exists or all tables exist and with the right
+        //   types.
+        // - Maybe have `CHECK` clauses to enforce things like address and integers
+        //   having expected length.
+        // - Maybe store serialized event descriptor in the database so we can load and
+        //   check it.
 
         if let Some(existing) = self.events.get(name) {
             if event != &existing.descriptor {
@@ -330,7 +363,9 @@ impl SqliteInner {
             .map(|table| format!("DELETE FROM {} WHERE block_number >= ?1;", table.name))
             .collect();
 
-        // Check that prepared statements are valid. Unfortunately we can't distinguish the statement being wrong from other Sqlite errors like being unable to access the database file on disk.
+        // Check that prepared statements are valid. Unfortunately we can't distinguish
+        // the statement being wrong from other Sqlite errors like being unable to
+        // access the database file on disk.
         for statement in &insert_statements {
             con.prepare_cached(&statement.sql)
                 .context("invalid prepared insert statement")?;
@@ -529,13 +564,14 @@ fn abi_kind_to_sql_type(value: &AbiKind) -> Option<SqlType> {
 
 #[cfg(test)]
 mod tests {
-    use solabi::{
-        ethprim::Address,
-        function::{ExternalFunction, Selector},
-        value::{Array, FixedBytes, Int, Uint},
+    use {
+        super::*,
+        solabi::{
+            ethprim::Address,
+            function::{ExternalFunction, Selector},
+            value::{Array, FixedBytes, Int, Uint},
+        },
     };
-
-    use super::*;
 
     #[test]
     fn new_for_test() {
@@ -555,8 +591,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn full_leaf_types() {
+    #[tokio::test]
+    async fn full_leaf_types() {
         let mut sqlite = Sqlite::new_for_test();
         let event = r#"
 event Event (
@@ -571,7 +607,7 @@ event Event (
 )
 "#;
         let event = EventDescriptor::parse_declaration(event).unwrap();
-        sqlite.prepare_event("event", &event).unwrap();
+        sqlite.prepare_event("event", &event).await.unwrap();
 
         let fields = vec![
             AbiValue::Int(Int::new(256, 1i32.into()).unwrap()),
@@ -598,13 +634,14 @@ event Event (
                     fields,
                 }],
             )
+            .await
             .unwrap();
 
         print_table(&sqlite.connection, "event");
     }
 
-    #[test]
-    fn with_array() {
+    #[tokio::test]
+    async fn with_array() {
         let mut sqlite = Sqlite::new_for_test();
         let event = r#"
 event Event (
@@ -612,7 +649,7 @@ event Event (
 )
 "#;
         let event = EventDescriptor::parse_declaration(event).unwrap();
-        sqlite.prepare_event("event", &event).unwrap();
+        sqlite.prepare_event("event", &event).await.unwrap();
 
         let log = Log {
             event: "event",
@@ -632,7 +669,7 @@ event Event (
             )],
             ..Default::default()
         };
-        sqlite.update(&[], &[log]).unwrap();
+        sqlite.update(&[], &[log]).await.unwrap();
 
         let log = Log {
             event: "event",
@@ -642,18 +679,18 @@ event Event (
             )],
             ..Default::default()
         };
-        sqlite.update(&[], &[log]).unwrap();
+        sqlite.update(&[], &[log]).await.unwrap();
 
         print_table(&sqlite.connection, "event");
         print_table(&sqlite.connection, "event_array_0");
     }
 
-    #[test]
-    fn event_blocks() {
+    #[tokio::test]
+    async fn event_blocks() {
         let mut sqlite = Sqlite::new_for_test();
         let event = EventDescriptor::parse_declaration("event Event()").unwrap();
-        sqlite.prepare_event("event", &event).unwrap();
-        let result = sqlite.event_block("event").unwrap();
+        sqlite.prepare_event("event", &event).await.unwrap();
+        let result = sqlite.event_block("event").await.unwrap();
         assert_eq!(result.indexed, 0);
         assert_eq!(result.finalized, 0);
         let blocks = database::EventBlock {
@@ -663,19 +700,19 @@ event Event (
                 finalized: 3,
             },
         };
-        sqlite.update(&[blocks], &[]).unwrap();
-        let result = sqlite.event_block("event").unwrap();
+        sqlite.update(&[blocks], &[]).await.unwrap();
+        let result = sqlite.event_block("event").await.unwrap();
         assert_eq!(result.indexed, 2);
         assert_eq!(result.finalized, 3);
     }
 
-    #[test]
-    fn remove() {
+    #[tokio::test]
+    async fn remove() {
         let mut sqlite = Sqlite::new_for_test();
 
         let event = EventDescriptor::parse_declaration("event Event()").unwrap();
-        sqlite.prepare_event("event", &event).unwrap();
-        sqlite.prepare_event("eventAAA", &event).unwrap();
+        sqlite.prepare_event("event", &event).await.unwrap();
+        sqlite.prepare_event("eventAAA", &event).await.unwrap();
         sqlite
             .update(
                 &[],
@@ -702,6 +739,7 @@ event Event (
                     },
                 ],
             )
+            .await
             .unwrap();
 
         let rows = |sqlite: &Sqlite| {
@@ -718,6 +756,7 @@ event Event (
                 event: "event",
                 number: 6,
             }])
+            .await
             .unwrap();
         assert_eq!(rows(&sqlite), 3);
 
@@ -726,6 +765,7 @@ event Event (
                 event: "eventAAA",
                 number: 1,
             }])
+            .await
             .unwrap();
         assert_eq!(rows(&sqlite), 3);
 
@@ -734,6 +774,7 @@ event Event (
                 event: "event",
                 number: 1,
             }])
+            .await
             .unwrap();
         assert_eq!(rows(&sqlite), 0);
     }

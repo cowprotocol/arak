@@ -3,16 +3,20 @@
 //! - Generate Ethereum RPC log filters for the specified configuration
 //! - Decode Ethereum log topics and data into Solidity values
 
-use crate::config;
-use anyhow::{Context, Result};
-use ethrpc::types::{ArrayVec, Digest, LogBlocks, LogFilter, LogFilterValue};
-use solabi::{
-    abi::EventDescriptor,
-    value::{EventEncoder, Value},
+use {
+    crate::config,
+    anyhow::{Context, Result},
+    ethrpc::types::{ArrayVec, Digest, LogBlocks, LogFilter, LogFilterValue},
+    solabi::{
+        abi::EventDescriptor,
+        value::{EventEncoder, Value},
+    },
+    std::borrow::Cow,
 };
-use std::borrow::Cow;
 
-/// An adapter for a single event.
+/// An [`Adapter`] is an adapter for a single event. Here's an example image of
+/// an [`Adapter`]. Its purpose is to adapt the single event.
+/// https://www.bhphotovideo.com/images/images2500x2500/hp_as615at_displayport_to_vga_adapter_1024540.jpg
 pub struct Adapter {
     name: String,
     signature: EventDescriptor,
@@ -22,7 +26,7 @@ pub struct Adapter {
 }
 
 impl Adapter {
-    /// Creates a new event indexer.
+    /// Creates a new adapter for a single event.
     pub fn new(config: config::Event) -> Result<Self> {
         let filter = LogFilter {
             address: match config.contract {
@@ -99,13 +103,14 @@ impl Adapter {
 
 #[cfg(test)]
 mod tests {
-    use hex_literal::hex;
-    use solabi::{
-        ethprim::{address, digest, keccak, uint},
-        value::Uint,
+    use {
+        super::*,
+        hex_literal::hex,
+        solabi::{
+            ethprim::{address, digest, keccak, uint},
+            value::Uint,
+        },
     };
-
-    use super::*;
 
     #[test]
     fn no_anonymous_events() {

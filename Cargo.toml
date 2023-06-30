@@ -15,6 +15,9 @@ toml = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = { version = "2", features = ["serde"] }
+futures = "0.3"
+tokio-postgres = "0.7"
+rust_decimal = { version = "1.30.0", features = ["db-tokio-postgres"] }
 
 [dev-dependencies]
 hex-literal = "0.4"

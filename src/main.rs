@@ -26,11 +26,11 @@ async fn main() -> Result<()> {
     env::set_current_dir(root)?;
 
     match &config.database {
-        config::Database::Sqlite { url } => {
-            run_indexer(&config, database::Sqlite::open(url)?).await?;
+        config::Database::Sqlite { connection } => {
+            run_indexer(&config, database::Sqlite::open(connection)?).await?;
         }
-        config::Database::Postgres { params } => {
-            run_indexer(&config, database::Postgres::connect(params).await?).await?;
+        config::Database::Postgres { connection } => {
+            run_indexer(&config, database::Postgres::connect(connection).await?).await?;
         }
     }
 

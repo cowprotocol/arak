@@ -7,12 +7,12 @@ use {
     },
     anyhow::{anyhow, Context, Result},
     futures::{future::BoxFuture, FutureExt},
-    rust_decimal::Decimal,
+    pg_bigdecimal::{BigDecimal, PgNumeric},
     solabi::{
         abi::EventDescriptor,
         value::{Value as AbiValue, ValueKind as AbiKind},
     },
-    std::{collections::HashMap, fmt::Write},
+    std::{collections::HashMap, fmt::Write, str::FromStr},
 };
 
 pub struct Postgres {
@@ -46,20 +46,24 @@ struct PreparedEvent {
     remove_statements: Vec<tokio_postgres::Statement>,
 }
 
+async fn connect(params: &str) -> Result<tokio_postgres::Client> {
+    let (client, connection) = tokio_postgres::connect(params, tokio_postgres::NoTls)
+        .await
+        .context("connect client")?;
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+    Ok(client)
+}
+
 impl Postgres {
     pub async fn connect(params: &str) -> Result<Self> {
         tracing::debug!("opening postgres database");
-        let (client, connection) = tokio_postgres::connect(params, tokio_postgres::NoTls)
-            .await
-            .context("connect client")?;
-
-        // The connection object performs the actual communication with the database,
-        // so spawn it off to run on its own.
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
-            }
-        });
+        let client = connect(params).await.context("connect")?;
 
         client
             .execute(CREATE_EVENT_BLOCK_TABLE, &[])
@@ -311,12 +315,12 @@ impl Postgres {
                     in_array = false;
                     return;
                 }
-                VisitValue::Value(AbiValue::Int(v)) => {
-                    Box::new(Decimal::from_str_exact(&v.get().to_string()).unwrap())
-                }
-                VisitValue::Value(AbiValue::Uint(v)) => {
-                    Box::new(Decimal::from_str_exact(&v.get().to_string()).unwrap())
-                }
+                VisitValue::Value(AbiValue::Int(v)) => Box::new(PgNumeric::new(Some(
+                    BigDecimal::from_str(&v.get().to_string()).unwrap(),
+                ))),
+                VisitValue::Value(AbiValue::Uint(v)) => Box::new(PgNumeric::new(Some(
+                    BigDecimal::from_str(&v.get().to_string()).unwrap(),
+                ))),
                 VisitValue::Value(AbiValue::Address(v)) => {
                     Box::new(v.0.into_iter().collect::<Vec<_>>())
                 }
@@ -477,5 +481,59 @@ fn abi_kind_to_sql_type(value: &AbiKind) -> Option<tokio_postgres::types::Type> 
         AbiKind::Bytes => Some(tokio_postgres::types::Type::BYTEA),
         AbiKind::String => Some(tokio_postgres::types::Type::TEXT),
         AbiKind::FixedArray(_, _) | AbiKind::Tuple(_) | AbiKind::Array(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use solabi::{
+        value::{Int, Uint},
+        I256, U256,
+    };
+
+    use super::*;
+
+    fn local_postgres_url() -> String {
+        format!("postgresql://{}@localhost", whoami::username())
+    }
+
+    async fn clear_database() {
+        let client = connect(&local_postgres_url()).await.unwrap();
+        // https://stackoverflow.com/a/36023359
+        let query = r#"
+DO $$ DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = current_schema()) LOOP
+        EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
+    END LOOP;
+END $$;
+        "#;
+        client.batch_execute(query).await.unwrap();
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn large_number() {
+        clear_database().await;
+        let mut db = Postgres::connect(&local_postgres_url()).await.unwrap();
+        let event = r#"
+event Event (
+    uint256,
+    int256
+)
+"#;
+        let event = EventDescriptor::parse_declaration(event).unwrap();
+        db.prepare_event("event", &event).await.unwrap();
+        let log = Log {
+            event: "event",
+            block_number: 0,
+            fields: vec![
+                AbiValue::Uint(Uint::new(256, U256::MAX).unwrap()),
+                AbiValue::Int(Int::new(256, I256::MIN).unwrap()),
+            ],
+            ..Default::default()
+        };
+        db.update(&[], &[log]).await.unwrap();
     }
 }

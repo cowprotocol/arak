@@ -412,6 +412,7 @@ impl Postgres {
                 tokio_postgres::types::Type::INT8 => "INT8",
                 tokio_postgres::types::Type::BYTEA => "BYTEA",
                 tokio_postgres::types::Type::NUMERIC => "NUMERIC",
+                tokio_postgres::types::Type::BOOL => "BOOLEAN",
                 _ => unreachable!(),
             };
             write!(&mut sql, " {type_}, ").unwrap();

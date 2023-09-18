@@ -544,13 +544,14 @@ event Event (
 
     #[ignore]
     #[tokio::test]
-    async fn boolean_fields() {
+    async fn boolean_and_text_fields() {
         clear_database().await;
         let mut db = Postgres::connect(&local_postgres_url()).await.unwrap();
         let event = r#"
 event Event (
     bool,
-    bool
+    bool,
+    string
 )
 "#;
         let event = EventDescriptor::parse_declaration(event).unwrap();
@@ -558,7 +559,11 @@ event Event (
         let log = Log {
             event: "event",
             block_number: 0,
-            fields: vec![AbiValue::Bool(true), AbiValue::Bool(false)],
+            fields: vec![
+                AbiValue::Bool(true),
+                AbiValue::Bool(false),
+                AbiValue::String("hello".to_string()),
+            ],
             ..Default::default()
         };
         db.update(&[], &[log]).await.unwrap();

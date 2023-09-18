@@ -413,7 +413,11 @@ impl Postgres {
                 tokio_postgres::types::Type::BYTEA => "BYTEA",
                 tokio_postgres::types::Type::NUMERIC => "NUMERIC",
                 tokio_postgres::types::Type::BOOL => "BOOLEAN",
-                _ => unreachable!(),
+                tokio_postgres::types::Type::TEXT => "TEXT",
+                unhandled_type => {
+                    tracing::debug!("Got Type {}", unhandled_type);
+                    unreachable!()
+                },
             };
             write!(&mut sql, " {type_}, ").unwrap();
         }

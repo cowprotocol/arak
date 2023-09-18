@@ -335,7 +335,7 @@ impl Postgres {
                         .collect::<Vec<_>>(),
                 ),
                 VisitValue::Value(AbiValue::Bytes(v)) => Box::new(v.to_owned()),
-                VisitValue::Value(AbiValue::String(v)) => Box::new(v.as_bytes().to_vec()),
+                VisitValue::Value(AbiValue::String(v)) => Box::new(v.to_string()),
                 _ => unreachable!(),
             };
             (if in_array {
@@ -417,7 +417,7 @@ impl Postgres {
                 unhandled_type => {
                     tracing::debug!("Got Type {}", unhandled_type);
                     unreachable!()
-                },
+                }
             };
             write!(&mut sql, " {type_}, ").unwrap();
         }

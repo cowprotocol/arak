@@ -324,7 +324,7 @@ impl Postgres {
                 VisitValue::Value(AbiValue::Address(v)) => {
                     Box::new(v.0.into_iter().collect::<Vec<_>>())
                 }
-                VisitValue::Value(AbiValue::Bool(v)) => Box::new(*v as i64),
+                VisitValue::Value(AbiValue::Bool(v)) => Box::new(*v),
                 VisitValue::Value(AbiValue::FixedBytes(v)) => Box::new(v.as_bytes().to_vec()),
                 VisitValue::Value(AbiValue::Function(v)) => Box::new(
                     v.address
@@ -533,6 +533,28 @@ event Event (
                 AbiValue::Uint(Uint::new(256, U256::MAX).unwrap()),
                 AbiValue::Int(Int::new(256, I256::MIN).unwrap()),
             ],
+            ..Default::default()
+        };
+        db.update(&[], &[log]).await.unwrap();
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn boolean_fields() {
+        clear_database().await;
+        let mut db = Postgres::connect(&local_postgres_url()).await.unwrap();
+        let event = r#"
+event Event (
+    bool,
+    bool
+)
+"#;
+        let event = EventDescriptor::parse_declaration(event).unwrap();
+        db.prepare_event("event", &event).await.unwrap();
+        let log = Log {
+            event: "event",
+            block_number: 0,
+            fields: vec![AbiValue::Bool(true), AbiValue::Bool(false)],
             ..Default::default()
         };
         db.update(&[], &[log]).await.unwrap();

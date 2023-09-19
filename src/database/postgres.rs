@@ -562,7 +562,7 @@ event Event (
             fields: vec![
                 AbiValue::Bool(true),
                 AbiValue::Bool(false),
-                AbiValue::String("hello".to_string()),
+                AbiValue::String("zef".to_string()),
             ],
             ..Default::default()
         };

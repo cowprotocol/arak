@@ -324,7 +324,7 @@ impl Postgres {
                 VisitValue::Value(AbiValue::Address(v)) => {
                     Box::new(v.0.into_iter().collect::<Vec<_>>())
                 }
-                VisitValue::Value(AbiValue::Bool(v)) => Box::new(*v as i64),
+                VisitValue::Value(AbiValue::Bool(v)) => Box::new(*v),
                 VisitValue::Value(AbiValue::FixedBytes(v)) => Box::new(v.as_bytes().to_vec()),
                 VisitValue::Value(AbiValue::Function(v)) => Box::new(
                     v.address
@@ -335,7 +335,7 @@ impl Postgres {
                         .collect::<Vec<_>>(),
                 ),
                 VisitValue::Value(AbiValue::Bytes(v)) => Box::new(v.to_owned()),
-                VisitValue::Value(AbiValue::String(v)) => Box::new(v.as_bytes().to_vec()),
+                VisitValue::Value(AbiValue::String(v)) => Box::new(v.to_string()),
                 _ => unreachable!(),
             };
             (if in_array {
@@ -412,7 +412,12 @@ impl Postgres {
                 tokio_postgres::types::Type::INT8 => "INT8",
                 tokio_postgres::types::Type::BYTEA => "BYTEA",
                 tokio_postgres::types::Type::NUMERIC => "NUMERIC",
-                _ => unreachable!(),
+                tokio_postgres::types::Type::BOOL => "BOOLEAN",
+                tokio_postgres::types::Type::TEXT => "TEXT",
+                unhandled_type => {
+                    tracing::debug!("Got Type {}", unhandled_type);
+                    unreachable!()
+                }
             };
             write!(&mut sql, " {type_}, ").unwrap();
         }
@@ -531,6 +536,33 @@ event Event (
             fields: vec![
                 AbiValue::Uint(Uint::new(256, U256::MAX).unwrap()),
                 AbiValue::Int(Int::new(256, I256::MIN).unwrap()),
+            ],
+            ..Default::default()
+        };
+        db.update(&[], &[log]).await.unwrap();
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn boolean_and_text_fields() {
+        clear_database().await;
+        let mut db = Postgres::connect(&local_postgres_url()).await.unwrap();
+        let event = r#"
+event Event (
+    bool,
+    bool,
+    string
+)
+"#;
+        let event = EventDescriptor::parse_declaration(event).unwrap();
+        db.prepare_event("event", &event).await.unwrap();
+        let log = Log {
+            event: "event",
+            block_number: 0,
+            fields: vec![
+                AbiValue::Bool(true),
+                AbiValue::Bool(false),
+                AbiValue::String("zef".to_string()),
             ],
             ..Default::default()
         };

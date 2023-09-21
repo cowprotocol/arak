@@ -1,0 +1,33 @@
+name: Deploy to Google Cloud
+
+on:
+  push:
+    branches: [main]
+    tags: [v*]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Set up docker auth
+        run: gcloud auth configure-docker
+
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_NAME=gcr.io/eth-cloud-mb/arak:latest
+          DOCKERFILE_PATH=docker/Dockerfile
+
+          docker build -t $IMAGE_NAME -f $DOCKERFILE_PATH .
+          docker push $IMAGE_NAME

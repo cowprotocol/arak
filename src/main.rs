@@ -23,9 +23,13 @@ struct Arguments {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
     dotenv().ok(); // Couldn't load multiple Env Vars without this!
     let args = Arguments::parse();
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_ansi(false)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let (config, root) = Config::load(&args.config, args.node_url, args.db_string)
         .context("failed to load configuration")?;

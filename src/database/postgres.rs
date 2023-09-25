@@ -335,7 +335,9 @@ impl Postgres {
                         .collect::<Vec<_>>(),
                 ),
                 VisitValue::Value(AbiValue::Bytes(v)) => Box::new(v.to_owned()),
-                VisitValue::Value(AbiValue::String(v)) => Box::new(v.to_string()),
+                VisitValue::Value(AbiValue::String(v)) => {
+                    Box::new(v.trim_matches('\0').to_string())
+                }
                 _ => unreachable!(),
             };
             (if in_array {
@@ -562,7 +564,7 @@ event Event (
             fields: vec![
                 AbiValue::Bool(true),
                 AbiValue::Bool(false),
-                AbiValue::String("zef".to_string()),
+                AbiValue::String("zef with trailing null bytes\0".to_string()),
             ],
             ..Default::default()
         };

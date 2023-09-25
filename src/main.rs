@@ -19,9 +19,14 @@ struct Arguments {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     let args = Arguments::parse();
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_env_filter("info,arak=debug")
+        .with_ansi(false)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     let (config, root) = Config::load(&args.config).context("failed to load configuration")?;
     env::set_current_dir(root)?;
 

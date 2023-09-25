@@ -1,5 +1,5 @@
 use database::Database;
-
+use dotenv::dotenv;
 mod config;
 mod database;
 mod indexer;
@@ -15,14 +15,20 @@ use {
 struct Arguments {
     #[clap(short, long, env = "ARAKCONFIG", default_value = "arak.toml")]
     config: PathBuf,
+    #[clap(short, long, env = "DB_STRING")]
+    db_string: Option<String>,
+    #[clap(short, long, env = "NODE_URL")]
+    node_url: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-
+    dotenv().ok(); // Couldn't load multiple Env Vars without this!
     let args = Arguments::parse();
-    let (config, root) = Config::load(&args.config).context("failed to load configuration")?;
+
+    let (config, root) = Config::load(&args.config, args.node_url, args.db_string)
+        .context("failed to load configuration")?;
     env::set_current_dir(root)?;
 
     match &config.database {

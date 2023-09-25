@@ -20,6 +20,7 @@ url = { version = "2", features = ["serde"] }
 futures = "0.3"
 tokio-postgres = "0.7"
 pg_bigdecimal = "0.1.5"
+dotenv = "0.15.0"
 
 [dev-dependencies]
 hex-literal = "0.4"

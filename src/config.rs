@@ -26,6 +26,19 @@ pub struct Config {
     pub events: Vec<Event>,
 }
 
+impl Config {
+    fn set_ethrpc(&mut self, value: Url) {
+        self.ethrpc = value;
+    }
+    fn set_database(&mut self, connection: String) {
+        if connection.contains("file:") {
+            self.database = Database::Sqlite { connection }
+        } else {
+            self.database = Database::Postgres { connection }
+        };
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Database {
@@ -65,9 +78,23 @@ pub enum Contract {
 impl Config {
     /// Reads a configuration from the specified path, returning the parsed
     /// configuration and its root path.
-    pub fn load(path: &Path) -> Result<(Self, PathBuf)> {
+    pub fn load(
+        path: &Path,
+        node_url: Option<String>,
+        db_url: Option<String>,
+    ) -> Result<(Self, PathBuf)> {
         let toml = fs::read_to_string(path)?;
-        let config = toml::from_str(&toml)?;
+        let mut config: Config = toml::from_str(&toml)?;
+        // Manual Overrides from env vars.
+        if let Some(ethrpc) = &node_url {
+            tracing::info!("using env NODE_URL");
+            config.set_ethrpc(Url::parse(&ethrpc)?)
+        }
+        if let Some(connection) = &db_url {
+            tracing::info!("using env DB_URL");
+            config.set_database(connection.to_string())
+        }
+
         let root = fs::canonicalize(path)?
             .parent()
             .expect("file path without a parent")

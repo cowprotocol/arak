@@ -1,3 +1,4 @@
+use toml::{Table, Value};
 use {
     anyhow::Result,
     ethrpc::types::{ArrayVec, LogFilterValue},
@@ -24,19 +25,6 @@ pub struct Config {
     pub indexer: Indexer,
     #[serde(rename = "event")]
     pub events: Vec<Event>,
-}
-
-impl Config {
-    fn set_ethrpc(&mut self, value: Url) {
-        self.ethrpc = value;
-    }
-    fn set_database(&mut self, connection: String) {
-        if connection.contains("file:") {
-            self.database = Database::Sqlite { connection }
-        } else {
-            self.database = Database::Postgres { connection }
-        };
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,17 +71,8 @@ impl Config {
         node_url: Option<String>,
         db_url: Option<String>,
     ) -> Result<(Self, PathBuf)> {
-        let toml = fs::read_to_string(path)?;
-        let mut config: Config = toml::from_str(&toml)?;
-        // Manual Overrides from env vars.
-        if let Some(ethrpc) = &node_url {
-            tracing::info!("using env NODE_URL");
-            config.set_ethrpc(Url::parse(&ethrpc)?)
-        }
-        if let Some(connection) = &db_url {
-            tracing::info!("using env DB_URL");
-            config.set_database(connection.to_string())
-        }
+        let toml = manual_override(fs::read_to_string(path)?, node_url, db_url)?;
+        let config: Config = toml::from_str(&toml.to_string())?;
 
         let root = fs::canonicalize(path)?
             .parent()
@@ -101,6 +80,32 @@ impl Config {
             .to_owned();
         Ok((config, root))
     }
+}
+
+fn manual_override(
+    toml_string: String,
+    node_url: Option<String>,
+    db_url: Option<String>,
+) -> Result<Table> {
+    let mut toml_values = toml_string.parse::<Table>()?;
+    // Manual overrides from env vars.
+    if let Some(ethrpc) = node_url {
+        tracing::info!("using env NODE_URL");
+        toml_values.insert("ethrpc".to_string(), Value::String(ethrpc));
+    }
+    if let Some(connection) = db_url {
+        tracing::info!("using env DB_URL");
+        let mut db_data = Table::new();
+        db_data.insert("connection".to_string(), Value::String(connection.clone()));
+        let mut db_type = Table::new();
+        if connection.contains("file:") {
+            db_type.insert("sqlite".to_string(), Value::Table(db_data))
+        } else {
+            db_type.insert("postgres".to_string(), Value::Table(db_data))
+        };
+        toml_values.insert("database".to_string(), Value::Table(db_type));
+    }
+    Ok(toml_values)
 }
 
 impl Debug for Config {
@@ -192,5 +197,77 @@ impl Event {
             topics: ArrayVec::new(),
             signature,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_manual_override() {
+        // Sample contains both ethrpc and database.sqlite config
+        let sample_toml = r#"
+        ethrpc = "old rpc"
+        [database.postgres]
+        connection = "old db"
+        "#
+        .to_string();
+
+        // Manual (Env) Values
+        let node_url = Some("new rpc".to_string());
+        let db_url = Some("new db".to_string());
+
+        // override both
+        let new_toml =
+            manual_override(sample_toml.clone(), node_url.clone(), db_url.clone()).unwrap();
+        assert_eq!(
+            new_toml,
+            r#"
+            ethrpc = "new rpc"
+            [database.postgres]
+            connection = "new db"
+            "#
+            .parse::<Table>()
+            .unwrap()
+        );
+
+        // only node_url
+        let new_toml = manual_override(sample_toml.clone(), node_url.clone(), None).unwrap();
+        assert_eq!(
+            new_toml,
+            r#"
+            ethrpc = "new rpc"
+            [database.postgres]
+            connection = "old db"
+            "#
+            .parse::<Table>()
+            .unwrap()
+        );
+
+        // only db_url
+        let new_toml = manual_override(sample_toml.clone(), None, db_url.clone()).unwrap();
+        assert_eq!(
+            new_toml,
+            r#"
+            ethrpc = "old rpc"
+            [database.postgres]
+            connection = "new db"
+            "#
+            .parse::<Table>()
+            .unwrap()
+        );
+
+        // toml without node or db provided
+        assert_eq!(
+            manual_override("".to_string(), node_url, db_url).unwrap(),
+            r#"
+            ethrpc = "new rpc"
+            [database.postgres]
+            connection = "new db"
+            "#
+            .parse::<Table>()
+            .unwrap()
+        );
     }
 }

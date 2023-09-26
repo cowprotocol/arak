@@ -26,6 +26,7 @@ async fn main() -> Result<()> {
     dotenv().ok(); // Couldn't load multiple Env Vars without this!
     let args = Arguments::parse();
     let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_env_filter(env::var("RUST_LOGS").unwrap_or("info,arak=debug".to_string()))
         .with_ansi(false)
         .finish();
 

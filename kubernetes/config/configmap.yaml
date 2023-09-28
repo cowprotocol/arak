@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .ConfigMapName }}
+  namespace: {{ .Namespace }}
+data:
+  arak.toml: |
+
+    [indexer]
+    page-size = 2000
+    poll-interval = 0.1
+
+    ## ERC721: https://eips.ethereum.org/EIPS/eip-721#specification
+    [[event]]
+    name = "erc721_transfer"
+    start = 0
+    contract = "*"
+    signature = "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
+
+    [[event]]
+    name = "erc721_approval"
+    start = 0
+    contract = "*"
+    signature = "event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)"
+
+    ## ERC1155: https://eips.ethereum.org/EIPS/eip-1155#specification
+    [[event]]
+    name = "erc1155_transfer_single"
+    start = 0
+    contract = "*"
+    signature = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
+
+    [[event]]
+    name = "erc1155_transfer_batch"
+    start = 0
+    contract = "*"
+    signature = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
+
+    [[event]]
+    name = "erc1155_uri"
+    start = 0
+    contract = "*"
+    signature = "event URI(string value, uint256 indexed id)"
+
+    ### Overlapping Events
+    [[event]]
+    name = "approval_for_all"
+    start = 0
+    contract = "*"
+    signature = "event ApprovalForAll(address indexed owner, address indexed operator, bool approved)"
+
+    #[[event]]
+    #name = "indexed_approval_for_all"
+    #start = 0
+    #contract = "*"
+    #signature = "event ApprovalForAll (index_topic_1 address _owner, index_topic_2 address _operator, index_topic_3 bool _approved)"

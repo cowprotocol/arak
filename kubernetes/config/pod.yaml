@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .ProjectName }}-indexer
+  namespace: {{ .Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .ProjectName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .ProjectName }}
+    spec:
+      containers:
+      - name: {{ .ProjectName }}
+        image: {{ .ContainerRepo }}/{{ .ProjectName }}:{{ .ImageTag }}
+        imagePullPolicy: Always
+        volumeMounts:
+        - name: config-volume
+          mountPath: {{ .ConfigPath }}/{{ .ConfigFile }}
+          subPath: {{ .ConfigFile }}
+        env:
+          - name: ARAKCONFIG
+            value: {{ .ConfigPath }}/{{ .ConfigFile }}
+
+          - name: NODE_URL
+            valueFrom:
+              secretKeyRef:
+                name: {{ .ProjectName }}-secrets
+                key: NODE_URL
+          - name: DB_STRING
+            valueFrom:
+              secretKeyRef:
+                name: {{ .ProjectName }}-secrets
+                key: DB_STRING
+      volumes:
+      - name: config-volume
+        configMap:
+          name: {{ .ProjectName }}-config

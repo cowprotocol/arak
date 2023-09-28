@@ -94,7 +94,7 @@ fn manual_override(
         toml_values.insert("ethrpc".to_string(), Value::String(ethrpc));
     }
     if let Some(connection) = db_url {
-        tracing::info!("using env DB_URL");
+        tracing::info!("using env DB_STRING");
         let mut db_data = Table::new();
         db_data.insert("connection".to_string(), Value::String(connection.clone()));
         let mut db_type = Table::new();

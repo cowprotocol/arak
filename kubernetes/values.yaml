@@ -1,0 +1,17 @@
+global:
+  Namespace: default
+  ConfigMapName: arak-config
+  PodName: arak-indexer
+  ContainerRepo: ghcr.io/mintbase
+  ProjectName: arak
+  ImageTag: latest
+  ConfigFile: arak.toml
+  ConfigPath: /conf
+
+include:
+  # Notice how secrets are not explicitly included.
+  # This is because you should kubectl create and apply them
+  - name: "deployment"
+    path: "config/pod.yaml"
+  - name: "map"
+    path: "config/configmap.yaml"

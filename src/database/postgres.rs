@@ -235,7 +235,7 @@ impl Database for Postgres {
             for log in logs {
                 Self::store_event(&mut transaction, &self.events, log)
                     .await
-                    .context("store_event")?;
+                    .context(format!("store_event {:?}", log))?;
             }
 
             transaction.commit().await.context("commit")
@@ -335,9 +335,7 @@ impl Postgres {
                         .collect::<Vec<_>>(),
                 ),
                 VisitValue::Value(AbiValue::Bytes(v)) => Box::new(v.to_owned()),
-                VisitValue::Value(AbiValue::String(v)) => {
-                    Box::new(v.trim_matches('\0').to_string())
-                }
+                VisitValue::Value(AbiValue::String(v)) => Box::new(v.replace('\0', "")),
                 _ => unreachable!(),
             };
             (if in_array {
@@ -501,7 +499,7 @@ mod tests {
     use super::*;
 
     fn local_postgres_url() -> String {
-        format!("postgresql://{}@localhost", whoami::username())
+        "postgresql://arak@localhost".to_string()
     }
 
     async fn clear_database() {
@@ -564,7 +562,9 @@ event Event (
             fields: vec![
                 AbiValue::Bool(true),
                 AbiValue::Bool(false),
-                AbiValue::String("zef with trailing null bytes\0".to_string()),
+                // Example taken from Erc1155Uri event at tx:
+                // 0x1174cad0a67be620255a206e5104ea1cadef3d300e0f2e2ab41483b249a67d2f
+                AbiValue::String("\0 \0\u{1}".to_string()),
             ],
             ..Default::default()
         };

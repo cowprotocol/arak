@@ -23,4 +23,4 @@ pg_bigdecimal = "0.1.5"
 
 [dev-dependencies]
 hex-literal = "0.4"
-whoami = { versio = "1.4", default-features = false }
+whoami = { version = "1.4", default-features = false }

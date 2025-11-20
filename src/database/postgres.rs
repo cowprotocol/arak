@@ -494,7 +494,7 @@ mod tests {
     use super::*;
 
     fn local_postgres_url() -> String {
-        format!("postgresql://{}@localhost", whoami::username())
+        "postgresql://postgres@localhost".to_string()
     }
 
     async fn clear_database() {

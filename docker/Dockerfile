@@ -1,4 +1,4 @@
-FROM docker.io/rust:1-slim-bookworm as cargo-build
+FROM docker.io/rust:1-slim-bookworm AS cargo-build
 WORKDIR /src
 
 RUN apt-get update && apt-get install -y git libsqlite3-dev libssl-dev pkg-config

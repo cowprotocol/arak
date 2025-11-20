@@ -101,7 +101,7 @@ where
         loop {
             let finalized = self
                 .eth
-                .execute(
+                .call(
                     eth::GetBlockByNumber,
                     (BlockTag::Finalized.into(), Hydrated::No),
                 )
@@ -177,7 +177,7 @@ where
 
         let next = match self
             .eth
-            .execute(eth::GetBlockByNumber, (chain.next().into(), Hydrated::No))
+            .call(eth::GetBlockByNumber, (chain.next().into(), Hydrated::No))
             .await?
         {
             Some(value) => value,
@@ -211,7 +211,7 @@ where
         let (finalized, results) = tokio::try_join!(
             async {
                 self.eth
-                    .execute(
+                    .call(
                         eth::GetBlockByNumber,
                         (BlockTag::Finalized.into(), Hydrated::No),
                     )
@@ -278,9 +278,9 @@ where
 fn database_logs(
     adapter: &Adapter,
     logs: Vec<ethrpc::types::Log>,
-) -> impl Iterator<Item = database::Log> {
+) -> impl Iterator<Item = database::Log<'_>> {
     if !logs.is_empty() {
-        tracing::debug!(
+        tracing::info!(
             event = %adapter.name(), logs = %logs.len(),
             "fetched logs"
         );

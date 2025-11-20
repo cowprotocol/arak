@@ -118,7 +118,7 @@ mod tests {
             .field
     }
 
-    fn collect_visits(field: &Field) -> Vec<VisitKind> {
+    fn collect_visits(field: &Field) -> Vec<VisitKind<'_>> {
         let mut visits = Vec::<VisitKind>::new();
         let mut visitor = |visit| {
             visits.push(visit);
